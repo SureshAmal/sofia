@@ -1,6 +1,6 @@
 //! Native GPUI Kit presenters in the existing desktop layer.
 use gpui_kit::component::{
-    ActiveTheme,
+    ActiveTheme, Icon, IconName,
     button::Button,
     chart::{BarChart, LineChart},
     checkbox::Checkbox,
@@ -11,7 +11,10 @@ use gpui_kit::*;
 use sofia_content::{ChartPoint, ChartType, Content, Document, Store, TodoItem};
 use std::{
     collections::HashSet,
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 
@@ -27,7 +30,9 @@ enum Update {
 struct Panel {
     view: Entity<DocumentView>,
     closing: Option<Instant>,
+    generation: u64,
 }
+static NEXT_PANEL_GENERATION: AtomicU64 = AtomicU64::new(1);
 pub(crate) struct WindowManager {
     panels: Vec<Panel>,
     commands: mpsc::Sender<Command>,
@@ -133,6 +138,7 @@ impl WindowManager {
                             self.panels.push(Panel {
                                 view: cx.new(|cx| DocumentView::new(doc, commands, window, cx)),
                                 closing: None,
+                                generation: NEXT_PANEL_GENERATION.fetch_add(1, Ordering::Relaxed),
                             });
                         }
                     }
@@ -198,8 +204,11 @@ impl WindowManager {
                     rem,
                 );
                 let closing = panel.closing.is_some();
-                let id =
-                    SharedString::from(format!("content-window-{}", panel.view.read(cx).doc.id));
+                let id = SharedString::from(format!(
+                    "content-window-{}-{}",
+                    panel.view.read(cx).doc.id,
+                    panel.generation
+                ));
                 div()
                     .id(id.clone())
                     .absolute()
@@ -565,21 +574,27 @@ impl Render for DocumentView {
                     )
                     .child(
                         Button::new("edit")
-                            .label(if self.editing {
-                                "Preview"
+                            .child(Icon::new(if self.editing {
+                                IconName::Eye
                             } else {
-                                "Edit source"
-                            })
+                                IconName::Pencil
+                            }))
+                            .opacity(0.)
+                            .hover(|style| style.opacity(1.))
                             .on_click(cx.listener(|view, _, _, cx| {
                                 view.editing = !view.editing;
                                 cx.notify();
                             })),
                     )
-                    .child(Button::new("close").label("Close").on_click(cx.listener(
-                        |view, _, _, _| {
-                            let _ = view.commands.send(Command::Close(view.doc.id.clone()));
-                        },
-                    ))),
+                    .child(
+                        Button::new("close")
+                            .child(Icon::new(IconName::X))
+                            .opacity(0.)
+                            .hover(|style| style.opacity(1.))
+                            .on_click(cx.listener(|view, _, _, _| {
+                                let _ = view.commands.send(Command::Close(view.doc.id.clone()));
+                            })),
+                    ),
             )
             .child(div().flex_1().min_h_0().overflow_hidden().child(body));
         if !self.editing
