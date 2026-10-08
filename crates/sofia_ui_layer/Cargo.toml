@@ -1,0 +1,12 @@
+[package]
+name = "sofia-ui-layer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+futures-util.workspace = true
+gpui-kit.workspace = true
+serde_json.workspace = true
+sofia-protocol.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true

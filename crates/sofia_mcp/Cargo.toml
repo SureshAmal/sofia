@@ -1,0 +1,7 @@
+[package]
+name = "sofia-mcp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sofia-protocol.workspace = true

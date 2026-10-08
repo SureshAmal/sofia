@@ -1,0 +1,9 @@
+[package]
+name = "sofia-setting"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+gpui-kit.workspace = true
+sofia-config = { workspace = true }
+sofia-protocol.workspace = true
