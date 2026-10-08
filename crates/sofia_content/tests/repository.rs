@@ -82,3 +82,99 @@ fn duplicate_titles_need_ids_and_two_connections_see_edits() {
     first.set_open(&doc.id, true).unwrap();
     assert_eq!(second.open_documents().unwrap().len(), 1);
 }
+
+#[test]
+fn chart_type_serde_lowercase_and_document_summary_open() {
+    use sofia_content::{ChartPoint, ChartType, Document, DocumentSummary};
+
+    for (variant, expected) in [
+        (ChartType::Line, "\"line\""),
+        (ChartType::Bar, "\"bar\""),
+        (ChartType::Area, "\"area\""),
+        (ChartType::Pie, "\"pie\""),
+        (ChartType::Radar, "\"radar\""),
+    ] {
+        let serialized = serde_json::to_string(&variant).unwrap();
+        assert_eq!(serialized, expected);
+        let deserialized: ChartType = serde_json::from_str(expected).unwrap();
+        assert_eq!(deserialized, variant);
+    }
+
+    let doc = Document {
+        id: "doc-1".into(),
+        title: "Test Doc".into(),
+        tags: vec!["tag1".into()],
+        content: Content::Chart {
+            chart_type: ChartType::Area,
+            points: vec![ChartPoint {
+                label: "A".into(),
+                value: 10.0,
+            }],
+        },
+        revision: 3,
+        updated_at: 1000,
+        open: true,
+        width_rem: 32.0,
+        height_rem: 24.0,
+    };
+
+    let summary_from_ref = DocumentSummary::from(&doc);
+    assert_eq!(summary_from_ref.id, "doc-1");
+    assert_eq!(summary_from_ref.title, "Test Doc");
+    assert_eq!(summary_from_ref.kind, "chart");
+    assert!(summary_from_ref.open);
+
+    let mut doc_closed = doc.clone();
+    doc_closed.open = false;
+    let summary_from_val = DocumentSummary::from(doc_closed);
+    assert!(!summary_from_val.open);
+}
+
+#[test]
+fn open_and_closed_documents_tracking() {
+    let sandbox = Sandbox::new();
+    let path = sandbox.0.join("content.db");
+    let store = Store::open(&path).unwrap();
+
+    let doc1 = store
+        .create(
+            "Doc 1".into(),
+            vec![],
+            Content::Note {
+                markdown: "One".into(),
+            },
+            32.,
+            24.,
+        )
+        .unwrap();
+
+    let doc2 = store
+        .create(
+            "Doc 2".into(),
+            vec![],
+            Content::Note {
+                markdown: "Two".into(),
+            },
+            32.,
+            24.,
+        )
+        .unwrap();
+
+    assert_eq!(store.closed_count().unwrap(), 2);
+    assert_eq!(store.closed_documents().unwrap().len(), 2);
+    assert_eq!(store.open_documents().unwrap().len(), 0);
+
+    store.set_open(&doc1.id, true).unwrap();
+    assert_eq!(store.closed_count().unwrap(), 1);
+    assert_eq!(store.closed_documents().unwrap().len(), 1);
+    assert_eq!(store.open_documents().unwrap().len(), 1);
+    assert_eq!(store.open_documents().unwrap()[0].id, doc1.id);
+    assert_eq!(store.closed_documents().unwrap()[0].id, doc2.id);
+
+    // Document summaries from list() have explicit open flag
+    let summaries = store.list(None, None, None).unwrap();
+    let s1 = summaries.iter().find(|s| s.id == doc1.id).unwrap();
+    let s2 = summaries.iter().find(|s| s.id == doc2.id).unwrap();
+    assert!(s1.open);
+    assert!(!s2.open);
+}

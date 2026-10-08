@@ -170,6 +170,23 @@ impl Store {
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)
     }
+    pub fn closed_documents(&self) -> Result<Vec<Document>, String> {
+        let conn = self.connection.lock().map_err(error)?;
+        let mut stmt = conn
+            .prepare("SELECT id,title,tags,content,revision,updated_at,is_open,width_rem,height_rem FROM documents WHERE is_open=0 ORDER BY updated_at DESC,id")
+            .map_err(error)?;
+        stmt.query_map([], row)
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)
+    }
+    pub fn closed_count(&self) -> Result<usize, String> {
+        let conn = self.connection.lock().map_err(error)?;
+        conn.query_row("SELECT COUNT(*) FROM documents WHERE is_open=0", [], |r| {
+            r.get::<_, i64>(0).map(|c| c.max(0) as usize)
+        })
+        .map_err(error)
+    }
     pub fn list(
         &self,
         query: Option<&str>,

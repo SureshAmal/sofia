@@ -41,10 +41,13 @@ pub struct ChartPoint {
     pub value: f64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "lowercase")]
 pub enum ChartType {
     Line,
     Bar,
+    Area,
+    Pie,
+    Radar,
 }
 impl Content {
     pub fn kind(&self) -> &'static str {
@@ -83,15 +86,14 @@ impl Content {
                     }
                 }
             }
-            Self::Chart { points, .. } => {
+            Self::Chart { points, .. }
                 if points.is_empty()
                     || points.len() > 1000
                     || points
                         .iter()
-                        .any(|point| !point.value.is_finite() || point.label.len() > 128)
-                {
-                    return Err("Chart requires 1–1000 finite values with short labels".into());
-                }
+                        .any(|point| !point.value.is_finite() || point.label.len() > 128) =>
+            {
+                return Err("Chart requires 1–1000 finite values with short labels".into());
             }
             _ => {}
         }
@@ -127,6 +129,19 @@ impl From<Document> for DocumentSummary {
             title: doc.title,
             kind: doc.content.kind().into(),
             tags: doc.tags,
+            revision: doc.revision,
+            updated_at: doc.updated_at,
+            open: doc.open,
+        }
+    }
+}
+impl From<&Document> for DocumentSummary {
+    fn from(doc: &Document) -> Self {
+        Self {
+            id: doc.id.clone(),
+            title: doc.title.clone(),
+            kind: doc.content.kind().into(),
+            tags: doc.tags.clone(),
             revision: doc.revision,
             updated_at: doc.updated_at,
             open: doc.open,

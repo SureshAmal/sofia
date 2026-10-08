@@ -16,8 +16,8 @@ pub fn load() -> Result<Settings, String> {
         .mcp_servers
         .iter()
         .any(|server| server.id == "sofia")
+        && let Ok(executable) = std::env::current_exe()
     {
-        if let Ok(executable) = std::env::current_exe() {
             let command = executable.with_file_name(if cfg!(windows) {
                 "sofia-mcp.exe"
             } else {
@@ -35,7 +35,6 @@ pub fn load() -> Result<Settings, String> {
                     ..Default::default()
                 });
             }
-        }
     }
     Ok(settings)
 }

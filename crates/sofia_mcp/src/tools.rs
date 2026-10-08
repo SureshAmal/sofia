@@ -16,14 +16,39 @@ fn resolve(store: &Store, args: &Value) -> Result<sofia_content::Document, Strin
 pub fn execute(store: &Store, name: &str, args: Value) -> Result<(Value, Option<String>), String> {
     let value = match name {
         "sofia_window_protocol" => {
-            json!({"version":1,"kinds":["note","todo","reminder","chart","html"],"tags":{"note":"markwindow","todo":"userwindow","reminder":"userwindow","chart":"visualizerwindow","html":"webwindow"},"chart_types":["line","bar"],"html":"GPUI native basic HTML document rendering; no browser CSS or JavaScript","size_units":"rem","live_updates":true,"edit_policy":"Get the latest revision before update; stale edits are rejected","reminders":"Stored due_at only; no scheduled alarm service yet","database":"sofia_mcp.db; separate from LLM history"})
+            json!({
+                "version": 1,
+                "kinds": ["note", "todo", "reminder", "chart", "html"],
+                "tags": {
+                    "note": "markwindow",
+                    "todo": "userwindow",
+                    "reminder": "userwindow",
+                    "chart": "visualizerwindow",
+                    "html": "webwindow"
+                },
+                "chart_types": ["line", "bar", "area", "pie", "radar"],
+                "placements": ["pill", "center", "left", "right", "bottom", "top_left", "top_right", "bottom_left", "bottom_right"],
+                "html": "GPUI native HTML rendering with inline styles, colors, tables and formatting",
+                "size_units": "rem",
+                "live_updates": true,
+                "edit_policy": "Direct inline edits on click with instant autosave; stale edits rejected",
+                "inline_editing_rules": "Markdown is live rendered; todos and reminders edit directly on click without a raw editor (click checkbox to toggle done, click text to edit inline with instant autosave)",
+                "reminders": "Stored due_at only; no scheduled alarm service yet",
+                "window_tracking": "Documents and windows explicitly track open/closed state. Use sofia_list_windows to see active and closed presentation windows (with open_count and closed_count), or sofia_list_documents to search all content with open/closed status",
+                "database": "sofia_mcp.db; separate from LLM history"
+            })
         }
         "sofia_create_document" => {
             let content: Content =
                 serde_json::from_value(args.get("content").cloned().ok_or("content is required")?)
                     .map_err(|e| e.to_string())?;
-            let tags = serde_json::from_value(args.get("tags").cloned().unwrap_or(json!([])))
+            let mut tags: Vec<String> = serde_json::from_value(args.get("tags").cloned().unwrap_or(json!([])))
                 .map_err(|e| e.to_string())?;
+            if let Some(placement) = optional(&args, "placement") {
+                let tag = format!("pos:{}", placement);
+                tags.retain(|t| !t.starts_with("pos:"));
+                tags.push(tag);
+            }
             let doc = store.create(
                 string(&args, "title")?,
                 tags,
@@ -74,29 +99,54 @@ pub fn execute(store: &Store, name: &str, args: Value) -> Result<(Value, Option<
         }
         "sofia_open_window" | "sofia_close_window" => {
             let mut doc = resolve(store, &args)?;
-            if name == "sofia_open_window"
-                && (args.get("width_rem").is_some() || args.get("height_rem").is_some())
-            {
-                let rev = doc.revision;
+            let mut changed = false;
+            if name == "sofia_open_window" {
                 if let Some(width) = args.get("width_rem").and_then(Value::as_f64) {
                     doc.width_rem = width as f32;
+                    changed = true;
                 }
                 if let Some(height) = args.get("height_rem").and_then(Value::as_f64) {
                     doc.height_rem = height as f32;
+                    changed = true;
                 }
+                if let Some(placement) = optional(&args, "placement") {
+                    doc.tags.retain(|t| !t.starts_with("pos:"));
+                    doc.tags.push(format!("pos:{}", placement));
+                    changed = true;
+                }
+            }
+            if changed {
+                let rev = doc.revision;
                 doc = store.update(doc, rev)?;
             }
             let doc = store.set_open(&doc.id, name == "sofia_open_window")?;
             return Ok((doc.json(), Some(doc.id)));
         }
-        "sofia_list_windows" => serde_json::to_value(
-            store
+        "sofia_list_windows" => {
+            let include_closed = args.get("include_closed").and_then(Value::as_bool).unwrap_or(false);
+            let open: Vec<sofia_content::DocumentSummary> = store
                 .open_documents()?
                 .into_iter()
                 .map(sofia_content::DocumentSummary::from)
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|e| e.to_string())?,
+                .collect();
+            let open_count = open.len();
+            let closed_count = store.closed_count()?;
+            let closed: Vec<sofia_content::DocumentSummary> = if include_closed {
+                store
+                    .closed_documents()?
+                    .into_iter()
+                    .map(sofia_content::DocumentSummary::from)
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            json!({
+                "open": open,
+                "closed": closed,
+                "open_count": open_count,
+                "closed_count": closed_count,
+            })
+        }
         _ => return Err("Unknown Sofia tool".into()),
     };
     Ok((value, None))
@@ -122,13 +172,13 @@ fn content_schema() -> Value {
                 vec!["kind", "items"]
             }
             "chart" => {
-                properties["chart_type"] = json!({"type":"string","enum":["line","bar"]});
+                properties["chart_type"] = json!({"type":"string","enum":["line","bar","area","pie","radar"]});
                 properties["points"] = json!({"type":"array","items":object(json!({"label":{"type":"string"},"value":{"type":"number"}}),vec!["label","value"])});
                 vec!["kind", "chart_type", "points"]
             }
             _ => {
                 properties["html"] =
-                    json!({"type":"string","description":"Basic HTML only; no CSS or scripts"});
+                    json!({"type":"string","description":"HTML formatted document rendered with CSS styling and tables"});
                 vec!["kind", "html"]
             }
         };
@@ -138,21 +188,33 @@ fn content_schema() -> Value {
 }
 pub fn declarations() -> Vec<Tool> {
     let selector = json!({"id":{"type":"string"},"title":{"type":"string","description":"Exact unique title; prefer ID"}});
-    let mut create = json!({"title":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}},"open":{"type":"boolean"},"width_rem":{"type":"number"},"height_rem":{"type":"number"}});
+    let placements = json!(["pill", "center", "left", "right", "bottom", "top_left", "top_right", "bottom_left", "bottom_right"]);
+    let mut create = json!({
+        "title":{"type":"string"},
+        "tags":{"type":"array","items":{"type":"string"}},
+        "open":{"type":"boolean"},
+        "placement":{"type":"string","enum":placements.clone(),"description":"Initial window placement (default: pill)"},
+        "width_rem":{"type":"number"},
+        "height_rem":{"type":"number"}
+    });
     create["content"] = content_schema();
     let mut update = json!({"id":{"type":"string"},"expected_revision":{"type":"integer"},"new_title":{"type":"string"},"tags":{"type":"array","items":{"type":"string"}}});
     update["content"] = content_schema();
     let mut open = selector.clone();
+    open["placement"] = json!({"type":"string","enum":placements,"description":"Window placement (pill, center, left, right, bottom, top_left, top_right, bottom_left, bottom_right)"});
     open["width_rem"] = json!({"type":"number"});
     open["height_rem"] = json!({"type":"number"});
+    let list_windows = json!({
+        "include_closed": {"type": "boolean", "description": "When true, includes closed windows with open=false in addition to active windows"}
+    });
     [
-        ("sofia_window_protocol","Get supported content kinds, tags, renderers, and editing rules",object(json!({}),vec![])),
-        ("sofia_create_document","Persist and optionally open notes, todos, reminders, charts, or basic HTML. Opens by default.",object(create,vec!["title","content"])),
-        ("sofia_list_documents","Search saved content by indexed text, kind or tag. Returns at most 100 summaries.",object(json!({"query":{"type":"string"},"kind":{"type":"string"},"tag":{"type":"string"}}),vec![])),
+        ("sofia_window_protocol","Get supported content kinds, tags, chart types (line, bar, area, pie, radar), window placements, inline editing rules, and open/closed window tracking",object(json!({}),vec![])),
+        ("sofia_create_document","Persist and optionally open notes, todos, reminders, charts (line, bar, area, pie, radar), or HTML. Opens by default.",object(create,vec!["title","content"])),
+        ("sofia_list_documents","Search saved content by indexed text, kind or tag. Returns document summaries with open/closed status.",object(json!({"query":{"type":"string"},"kind":{"type":"string"},"tag":{"type":"string"}}),vec![])),
         ("sofia_get_document","Read saved content and revision by ID or exact unique title",object(selector.clone(),vec![])),
-        ("sofia_update_document","Edit saved content and update an open window live. Supply latest expected_revision to avoid overwriting user edits.",object(update,vec!["id","expected_revision"])),
-        ("sofia_open_window","Open saved content by ID or unique title; morph from the Sofia pill",object(open,vec![])),
+        ("sofia_update_document","Edit saved content and update open window live. Supply latest expected_revision to avoid overwriting user edits.",object(update,vec!["id","expected_revision"])),
+        ("sofia_open_window","Open saved content by ID or unique title at a specific position (pill, center, left, right, bottom, top_left, top_right, bottom_left, bottom_right)",object(open,vec![])),
         ("sofia_close_window","Close a presentation window into the pill without deleting its saved content",object(selector,vec![])),
-        ("sofia_list_windows","List all requested open windows with IDs, titles and tags",object(json!({}),vec![])),
+        ("sofia_list_windows","List open (and optionally closed) windows with IDs, titles, open status, kinds, and tags",object(list_windows,vec![])),
     ].into_iter().map(|(name,description,schema)|Tool::new(name,description,schema.as_object().unwrap().clone())).collect()
 }
