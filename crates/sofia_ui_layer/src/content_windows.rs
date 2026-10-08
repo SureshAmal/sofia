@@ -567,6 +567,7 @@ impl Render for DocumentView {
                     .flex()
                     .items_center()
                     .gap_3()
+                    .group("window-actions")
                     .child(
                         div()
                             .flex_1()
@@ -575,7 +576,6 @@ impl Render for DocumentView {
                     )
                     .child(
                         div()
-                            .group("window-actions")
                             .flex()
                             .gap_1()
                             .child(

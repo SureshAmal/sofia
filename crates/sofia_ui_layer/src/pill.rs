@@ -666,7 +666,7 @@ impl Render for PillView {
             } else if self.drag_offset.is_none() {
                 let mut regions =
                     self.documents
-                        .regions((x, y), self.pill_size, self.viewport, rem, cx);
+                        .regions((input_x, input_y), input_size, self.viewport, rem, cx);
                 regions.push(bounds(
                     point(px(input_x), px(input_y)),
                     size(px(input_size.0), px(input_size.1)),
@@ -695,9 +695,9 @@ impl Render for PillView {
                 },
             );
 
-            let documents = self
-                .documents
-                .render((x, y), self.pill_size, self.viewport, rem, cx);
+            let documents =
+                self.documents
+                    .render((input_x, input_y), input_size, self.viewport, rem, cx);
             let view = cx.entity().downgrade();
             let view_up = cx.entity().downgrade();
             div()
