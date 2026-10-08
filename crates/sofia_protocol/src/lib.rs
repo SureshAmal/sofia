@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 10;
 pub const AUDIO_SPECTRUM_BANDS: usize = 21;
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -47,6 +47,7 @@ pub enum ClientRequest {
     },
     StartListening,
     StopListening,
+    ReloadSettings,
     SetSpeakerMuted {
         muted: bool,
     },
@@ -57,6 +58,9 @@ pub enum ClientRequest {
     ListGeminiVoices,
     SelectGeminiVoice {
         voice_name: Option<String>,
+    },
+    ContentChanged {
+        id: String,
     },
     Ping,
 }
@@ -148,6 +152,9 @@ pub enum TurnState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum ServerEvent {
+    ContentChanged {
+        id: String,
+    },
     TurnStateChanged {
         state: TurnState,
     },
@@ -183,6 +190,11 @@ pub enum ServerEvent {
     ToolCallRequested {
         call_id: String,
         name: String,
+    },
+    ToolCallFinished {
+        call_id: String,
+        name: String,
+        success: bool,
     },
     Error {
         message: String,

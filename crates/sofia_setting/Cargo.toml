@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+cpal.workspace = true
 gpui-kit.workspace = true
+livesofia.workspace = true
+serde_json.workspace = true
 sofia-config = { workspace = true }
+sofia-mcp-client.workspace = true
 sofia-protocol.workspace = true
+sofia-ui-layer.workspace = true
+tokio.workspace = true

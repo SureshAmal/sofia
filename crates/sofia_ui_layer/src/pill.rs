@@ -1,10 +1,11 @@
 //! Sofia's movable voice pill inside a transparent GPUI layer.
 
+use crate::speech_flow::SpeechFlow;
+use std::collections::BTreeMap;
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::*;
 use sofia_protocol::{
@@ -13,24 +14,26 @@ use sofia_protocol::{
 
 use crate::ipc_client::{IpcClient, UiUpdate};
 
-const PILL_WIDTH_REM: f32 = 3.0; // w-12
-const PILL_HEIGHT_REM: f32 = 12.0; // h-48
-const PANEL_WIDTH_REM: f32 = 36.0; // w-144
-const PANEL_HEIGHT_REM: f32 = 16.0; // h-64
-const EDGE_GAP_REM: f32 = 1.0; // spacing-4
+const BASE_EDGE_GAP_REM: f32 = 0.75;
 
 pub struct PillView {
+    documents: crate::content_windows::WindowManager,
     ipc: IpcClient,
     receiver: Receiver<UiUpdate>,
     snapshot: StateSnapshot,
     bands: [f32; AUDIO_SPECTRUM_BANDS],
+    smooth_bands: [f32; AUDIO_SPECTRUM_BANDS],
     phase: f32,
     error: bool,
     expanded: bool,
     assistant_text: String,
+    speech: SpeechFlow,
+    tools: BTreeMap<String, String>,
+    last_tool: Option<(String, Instant)>,
     fullscreen: bool,
     viewport: (f32, f32),
     pill_size: (f32, f32),
+    panel_size: (f32, f32),
     position: Option<(f32, f32)>,
     drag_offset: Option<(f32, f32)>,
     snap_x: Option<f32>,
@@ -53,17 +56,23 @@ impl PillView {
         })
         .detach();
         Self {
+            documents: crate::content_windows::WindowManager::new(),
             ipc,
             receiver,
             snapshot: StateSnapshot::default(),
             bands: [0.0; AUDIO_SPECTRUM_BANDS],
+            smooth_bands: [0.0; AUDIO_SPECTRUM_BANDS],
             phase: 0.0,
             error: false,
             expanded: false,
             assistant_text: String::new(),
+            speech: SpeechFlow::default(),
+            tools: BTreeMap::new(),
+            last_tool: None,
             fullscreen,
             viewport: (0.0, 0.0),
             pill_size: (0.0, 0.0),
+            panel_size: (0.0, 0.0),
             position: None,
             drag_offset: None,
             snap_x: None,
@@ -73,7 +82,7 @@ impl PillView {
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
-        let mut changed = false;
+        let mut changed = self.documents.tick();
         while let Ok(update) = self.receiver.try_recv() {
             changed = true;
             match update {
@@ -85,38 +94,68 @@ impl PillView {
                 UiUpdate::Disconnected => {
                     self.snapshot.state = TurnState::Disconnected;
                     self.snapshot.microphone_active = false;
+                    self.speech.clear();
+                    self.tools.clear();
+                    self.last_tool = None;
                 }
             }
         }
-        if let Some(target) = self.snap_x {
-            if let Some((x, y)) = self.position.as_mut() {
-                self.velocity_x = (self.velocity_x + (target - *x) * 0.12) * 0.76;
-                *x += self.velocity_x;
-                if (target - *x).abs() < 0.35 && self.velocity_x.abs() < 0.35 {
-                    *x = target;
-                    self.snap_x = None;
-                    self.velocity_x = 0.0;
-                }
-                let _ = y;
-                changed = true;
+        if let Some(target) = self.snap_x
+            && let Some((x, _)) = self.position.as_mut()
+        {
+            // Snappy damping for edge magnetism
+            self.velocity_x = (self.velocity_x + (target - *x) * 0.18) * 0.72;
+            *x += self.velocity_x;
+            if (target - *x).abs() < 0.25 && self.velocity_x.abs() < 0.25 {
+                *x = target;
+                self.snap_x = None;
+                self.velocity_x = 0.0;
             }
+            changed = true;
         }
+
+        changed |= self.speech.tick(Instant::now());
+        if self
+            .last_tool
+            .as_ref()
+            .is_some_and(|(_, time)| time.elapsed() > Duration::from_millis(900))
+        {
+            self.last_tool = None;
+            changed = true;
+        }
+
+        // Decay peak targets smoothly
         for band in &mut self.bands {
             if *band > 0.001 {
-                *band *= 0.92;
+                *band *= 0.88;
                 changed = true;
             }
         }
-        if matches!(
+
+        // Interpolate smooth_bands toward target bands for fluid visualization
+        for (smooth, &target) in self.smooth_bands.iter_mut().zip(self.bands.iter()) {
+            let diff = target - *smooth;
+            if diff.abs() > 0.002 {
+                *smooth += if diff > 0.0 {
+                    diff * 0.45 // Quick attack
+                } else {
+                    diff * 0.22 // Smooth release
+                };
+                changed = true;
+            }
+        }
+
+        if (matches!(
             self.snapshot.state,
             TurnState::Connecting
                 | TurnState::Reconnecting
                 | TurnState::Thinking
                 | TurnState::ToolQueued
                 | TurnState::ToolRunning
-        ) && !cx.reduce_motion()
+        ) || !self.tools.is_empty())
+            && !cx.reduce_motion()
         {
-            self.phase += 0.08;
+            self.phase += 0.10;
             changed = true;
         }
         if changed {
@@ -126,17 +165,50 @@ impl PillView {
 
     fn apply_event(&mut self, event: ServerEvent) {
         match event {
+            ServerEvent::ContentChanged { .. } => self.documents.refresh(),
             ServerEvent::TurnStateChanged { state } => {
                 self.snapshot.state = state;
-                if state == TurnState::Listening {
-                    self.assistant_text.clear();
+                if matches!(
+                    state,
+                    TurnState::Disconnected
+                        | TurnState::Connecting
+                        | TurnState::Reconnecting
+                        | TurnState::Ready
+                ) {
+                    self.speech.clear();
+                    self.tools.clear();
+                    self.last_tool = None;
                 }
                 if state != TurnState::Error {
                     self.error = false;
                 }
             }
-            ServerEvent::AssistantTextDelta { text, .. } => self.assistant_text.push_str(&text),
-            ServerEvent::AssistantTextFinal { text, .. } => self.assistant_text = text,
+            ServerEvent::AssistantTextDelta { turn_id, text } => {
+                self.last_tool = None;
+                self.speech
+                    .update(turn_id.to_string(), &text, false, Instant::now());
+            }
+            ServerEvent::AssistantTextFinal {
+                turn_id,
+                text,
+                interrupted,
+            } => {
+                if interrupted {
+                    self.speech.clear();
+                } else {
+                    self.speech
+                        .update(turn_id.to_string(), &text, true, Instant::now());
+                }
+            }
+            ServerEvent::ToolCallRequested { call_id, name } => {
+                self.speech.clear();
+                self.last_tool = None;
+                self.tools.insert(call_id, display_tool_name(&name));
+            }
+            ServerEvent::ToolCallFinished { call_id, name, .. } => {
+                self.tools.remove(&call_id);
+                self.last_tool = Some((display_tool_name(&name), Instant::now()));
+            }
             ServerEvent::AudioSpectrum { source, bins } => {
                 let active_source = match self.snapshot.state {
                     TurnState::Listening => Some(AudioSource::User),
@@ -145,7 +217,8 @@ impl PillView {
                 };
                 if active_source == Some(source) {
                     for (band, incoming) in self.bands.iter_mut().zip(bins) {
-                        *band = (*band * 0.35 + incoming.clamp(0.0, 1.0) * 0.65).max(*band * 0.75);
+                        let incoming_level = incoming.clamp(0.0, 1.0);
+                        *band = (*band * 0.25 + incoming_level * 0.75).max(*band * 0.8);
                     }
                 }
             }
@@ -156,19 +229,13 @@ impl PillView {
                 self.snapshot.microphone_active = microphone_active;
                 self.snapshot.speaker_muted = speaker_muted;
             }
-            ServerEvent::Error { .. } => self.error = true,
-            _ => {}
-        }
-    }
-
-    fn toggle_listening(&mut self) {
-        if self.dragged {
-            self.dragged = false;
-            return;
-        }
-        match self.snapshot.state {
-            TurnState::Listening => self.ipc.send(ClientRequest::StopListening),
-            TurnState::Ready => self.ipc.send(ClientRequest::StartListening),
+            ServerEvent::Error { message } => {
+                self.error = true;
+                self.speech.clear();
+                self.tools.clear();
+                self.last_tool = None;
+                self.assistant_text = message;
+            }
             _ => {}
         }
     }
@@ -183,13 +250,33 @@ impl PillView {
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window) {
-        if !self.fullscreen || self.expanded {
+        if !self.fullscreen {
             return;
         }
+        let (w, h) = if self.expanded {
+            self.panel_size
+        } else {
+            self.pill_size
+        };
         if let Some((x, y)) = self.position {
+            let on_right = x + self.pill_size.0 / 2.0 >= self.viewport.0 / 2.0;
+            let current_x = if self.expanded {
+                if on_right {
+                    (x + self.pill_size.0 - w).max(0.0)
+                } else {
+                    x
+                }
+            } else {
+                x
+            };
+            let current_y = if self.expanded {
+                (y + (self.pill_size.1 - h) / 2.0).clamp(0.0, (self.viewport.1 - h).max(0.0))
+            } else {
+                y
+            };
             self.drag_offset = Some((
-                f32::from(event.position.x) - x,
-                f32::from(event.position.y) - y,
+                f32::from(event.position.x) - current_x,
+                f32::from(event.position.y) - current_y,
             ));
             self.dragged = false;
             self.snap_x = None;
@@ -205,11 +292,32 @@ impl PillView {
         if !event.dragging() {
             return;
         }
+        let (w, h) = if self.expanded {
+            self.panel_size
+        } else {
+            self.pill_size
+        };
         let (old_x, old_y) = self.position.unwrap_or_default();
-        let x = (f32::from(event.position.x) - offset_x)
-            .clamp(0.0, (self.viewport.0 - self.pill_size.0).max(0.0));
-        let y = (f32::from(event.position.y) - offset_y)
-            .clamp(0.0, (self.viewport.1 - self.pill_size.1).max(0.0));
+        let new_elem_x =
+            (f32::from(event.position.x) - offset_x).clamp(0.0, (self.viewport.0 - w).max(0.0));
+        let new_elem_y =
+            (f32::from(event.position.y) - offset_y).clamp(0.0, (self.viewport.1 - h).max(0.0));
+
+        let (x, y) = if self.expanded {
+            let on_right = new_elem_x + w / 2.0 >= self.viewport.0 / 2.0;
+            let pill_x = if on_right {
+                (new_elem_x + w - self.pill_size.0)
+                    .clamp(0.0, (self.viewport.0 - self.pill_size.0).max(0.0))
+            } else {
+                new_elem_x.clamp(0.0, (self.viewport.0 - self.pill_size.0).max(0.0))
+            };
+            let pill_y = (new_elem_y - (self.pill_size.1 - h) / 2.0)
+                .clamp(0.0, (self.viewport.1 - self.pill_size.1).max(0.0));
+            (pill_x, pill_y)
+        } else {
+            (new_elem_x, new_elem_y)
+        };
+
         if (x - old_x).abs() + (y - old_y).abs() > 3.0 {
             self.dragged = true;
         }
@@ -222,7 +330,7 @@ impl PillView {
             return;
         }
         if let Some((x, _)) = self.position {
-            let gap = f32::from(window.rem_size()) * EDGE_GAP_REM;
+            let gap = f32::from(window.rem_size()) * BASE_EDGE_GAP_REM;
             self.snap_x = Some(if x + self.pill_size.0 / 2.0 < self.viewport.0 / 2.0 {
                 gap
             } else {
@@ -241,80 +349,134 @@ impl PillView {
             TurnState::Connecting | TurnState::Reconnecting => "Sofia connecting",
             TurnState::Ready => "Start listening",
             TurnState::Listening => "Stop listening",
-            TurnState::Thinking => "Sofia thinking",
+            TurnState::Thinking => "Thinking…",
             TurnState::Speaking => "Sofia speaking",
-            TurnState::ToolQueued | TurnState::ToolRunning => "Sofia using a tool",
+            TurnState::ToolQueued | TurnState::ToolRunning => "Working…",
             TurnState::Error => "Sofia error",
         }
     }
 }
 
-/// Each line uses one FFT band; width follows its frequency energy.
+/// Dynamic FFT audio visualizer supporting compact minimal and expanded full layouts.
 struct PillWaveform {
     bands: [f32; AUDIO_SPECTRUM_BANDS],
     phase: f32,
     state: TurnState,
     color: Hsla,
+    accent: Hsla,
+    bar_size: Pixels,
     reduced_motion: bool,
 }
 
 impl PillWaveform {
-    fn bar_fraction(&self, index: usize) -> f32 {
-        let center = 1.0
-            - ((index as f32 - (AUDIO_SPECTRUM_BANDS as f32 - 1.0) / 2.0).abs()
-                / (AUDIO_SPECTRUM_BANDS as f32 / 2.0));
-        let base = 0.45 + center * 0.28;
-        let active = if matches!(
+    fn levels(&self, count: usize) -> Vec<f32> {
+        let animated = matches!(
             self.state,
             TurnState::Connecting
                 | TurnState::Reconnecting
                 | TurnState::Thinking
                 | TurnState::ToolQueued
                 | TurnState::ToolRunning
-        ) && !self.reduced_motion
-        {
-            (self.phase + index as f32 * 0.55).sin().abs() * 0.18
-        } else {
-            self.bands[index] * 0.4
-        };
-        (base + active).clamp(0.35, 1.0)
+        ) && !self.reduced_motion;
+
+        (0..count)
+            .map(|index| {
+                if animated {
+                    return (self.phase + index as f32 * 0.58).sin().abs() * 0.72;
+                }
+                let start = index * AUDIO_SPECTRUM_BANDS / count;
+                let end = ((index + 1) * AUDIO_SPECTRUM_BANDS / count)
+                    .max(start + 1)
+                    .min(AUDIO_SPECTRUM_BANDS);
+                self.bands[start..end]
+                    .iter()
+                    .copied()
+                    .fold(0.0_f32, f32::max)
+                    .powf(0.72)
+            })
+            .collect()
     }
 
     fn render(self, horizontal: bool) -> AnyElement {
-        if horizontal {
-            h_flex()
-                .h_12()
-                .flex_1()
-                .items_center()
-                .justify_between()
-                .children((0..AUDIO_SPECTRUM_BANDS).map(|index| {
-                    div()
-                        .w_1()
-                        .h(relative(self.bar_fraction(index)))
-                        .rounded_full()
-                        .bg(self.color)
-                }))
-                .into_any_element()
-        } else {
-            v_flex()
-                .w_full()
-                .flex_1()
-                .items_center()
-                .justify_between()
-                .children((0..AUDIO_SPECTRUM_BANDS).map(|index| {
-                    div()
-                        .w(relative(self.bar_fraction(index)))
-                        .h_1()
-                        .rounded_full()
-                        .bg(self.color)
-                }))
-                .into_any_element()
-        }
+        let levels = self.levels(if horizontal { 14 } else { 13 });
+        let color = self.color;
+        let accent = self.accent;
+        let strongest = levels
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(index, _)| index);
+        let peak = levels.iter().copied().fold(0.0_f32, f32::max);
+        let bar_size = self.bar_size;
+
+        canvas(
+            |_, _, _| {},
+            move |frame, _, window, _| {
+                let count = levels.len() as f32;
+                let axis = if horizontal {
+                    f32::from(frame.size.width)
+                } else {
+                    f32::from(frame.size.height)
+                };
+                let step = axis / count;
+                let thickness = if horizontal {
+                    (bar_size * 1.5).min(px(step * 0.58))
+                } else {
+                    bar_size.min(px(step * 0.58))
+                };
+                let radius = thickness / 2.0;
+
+                for (index, level) in levels.into_iter().enumerate() {
+                    let primary = horizontal && strongest == Some(index) && level > 0.025;
+                    // Blend the live speech envelope with each frequency band so
+                    // quieter bands stay visible without one oversized peak.
+                    let level = if horizontal {
+                        (level * 0.65 + peak * 0.35).powf(0.65) * 0.80
+                    } else {
+                        level
+                    }
+                    .clamp(0.0, 1.0);
+                    let bar_bounds = if horizontal {
+                        let height = bar_size.max(frame.size.height * level);
+                        bounds(
+                            point(
+                                frame.origin.x + px(step * (index as f32 + 0.5)) - thickness / 2.0,
+                                frame.origin.y + (frame.size.height - height) / 2.0,
+                            ),
+                            size(thickness, height),
+                        )
+                    } else {
+                        let width = bar_size.max(frame.size.width * level);
+                        bounds(
+                            point(
+                                frame.origin.x + (frame.size.width - width) / 2.0,
+                                frame.origin.y + px(step * (index as f32 + 0.5)) - thickness / 2.0,
+                            ),
+                            size(width, thickness),
+                        )
+                    };
+                    window.paint_quad(
+                        fill(
+                            bar_bounds,
+                            if primary {
+                                accent
+                            } else {
+                                color.opacity(0.55 + level * 0.35)
+                            },
+                        )
+                        .corner_radii(radius),
+                    );
+                }
+            },
+        )
+        .size_full()
+        .into_any_element()
     }
 }
 
 impl Render for PillView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.documents.sync(window, cx);
         let theme = cx.theme();
         let color = if self.error || self.snapshot.state == TurnState::Error {
             theme.red
@@ -332,88 +494,125 @@ impl Render for PillView {
             }
         };
         let label = self.status_label();
-        let view = cx.entity().downgrade();
-        let marker = Button::new("sofia-microphone")
-            .ghost()
-            .compact()
-            .accessibility_label(label)
-            .tooltip(label)
-            .child(div().size_5().rounded_full().border_2().border_color(color))
-            .on_click(move |_, _, cx| {
-                cx.stop_propagation();
-                if let Some(view) = view.upgrade() {
-                    view.update(cx, |view, _| view.toggle_listening());
-                }
-            });
         let expanded = self.expanded;
+        let bar_size = px(f32::from(window.rem_size()) * 0.125);
         let waveform = PillWaveform {
-            bands: self.bands,
+            bands: self.smooth_bands,
             phase: self.phase,
             state: self.snapshot.state,
             color,
+            accent: theme.blue,
+            bar_size,
             reduced_motion: cx.reduce_motion(),
         }
         .render(expanded);
+
         let content = if expanded {
-            let text = if self.assistant_text.is_empty() {
-                label.to_string()
+            let tool = self
+                .tools
+                .values()
+                .next()
+                .cloned()
+                .or_else(|| self.last_tool.as_ref().map(|(name, _)| name.clone()));
+            let text = if self.error {
+                div()
+                    .text_base()
+                    .text_color(color)
+                    .child(self.assistant_text.clone())
+                    .into_any_element()
+            } else if let Some(tool) = tool {
+                div()
+                    .text_base()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(color)
+                    .opacity(if cx.reduce_motion() {
+                        1.
+                    } else {
+                        0.75 + 0.25 * (self.phase * 0.65).sin().abs()
+                    })
+                    .child(tool)
+                    .into_any_element()
+            } else if self.speech.visible() {
+                self.speech.render(theme.blue, theme.foreground)
             } else {
-                self.assistant_text.clone()
+                div()
+                    .text_base()
+                    .text_color(color)
+                    .child(label)
+                    .into_any_element()
             };
             v_flex()
                 .size_full()
-                .gap_6()
-                .p_6()
+                .gap_2()
+                .p_2p5()
                 .child(
                     h_flex()
                         .w_full()
+                        .h_8()
                         .items_center()
-                        .gap_4()
-                        .child(marker)
-                        .child(waveform),
+                        .child(div().h_8().flex_1().child(waveform)),
                 )
-                .child(div().text_lg().text_color(color).child(text))
+                .child(div().flex_1().min_h_0().overflow_hidden().child(text))
                 .into_any_element()
         } else {
             v_flex()
                 .size_full()
                 .items_center()
-                .gap_2()
-                .px_2()
+                .justify_center()
+                .px_1()
                 .py_2()
-                .child(marker)
                 .child(waveform)
                 .into_any_element()
         };
+
         let content = div().size_full().child(content).with_spring(
             "sofia-pill-content-morph",
-            SpringAnimation::new(SpringConfig::new(240.0, 28.0, 1.0))
+            SpringAnimation::new(SpringConfig::new(320.0, 30.0, 1.0))
                 .to(if expanded { 1.0 } else { 0.0 })
-                .from(0.0)
                 .with_epsilon(0.001),
             move |this, value| {
                 let opacity = if expanded {
-                    ((value - 0.55) / 0.45).clamp(0.0, 1.0)
+                    ((value - 0.40) / 0.60).clamp(0.0, 1.0)
                 } else {
-                    ((0.45 - value) / 0.45).clamp(0.0, 1.0)
+                    ((0.60 - value) / 0.60).clamp(0.0, 1.0)
                 };
                 this.opacity(opacity)
             },
         );
+
         let view = cx.entity().downgrade();
         let click_view = cx.entity().downgrade();
+        let listen_view = cx.entity().downgrade();
+
+        // 20% transparent background (80% opacity)
+        let pill_bg = theme.background.opacity(0.80);
+
         let pill = div()
             .id("sofia-pill")
             .relative()
             .overflow_hidden()
             .rounded_full()
-            .border_2()
-            .border_color(color)
-            .bg(theme.background)
+            .border_1()
+            .border_color(color.opacity(0.85))
+            .bg(pill_bg)
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 if let Some(view) = view.upgrade() {
                     view.update(cx, |view, _| view.on_mouse_down(event, window));
+                }
+            })
+            .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                if let Some(view) = listen_view.upgrade() {
+                    view.update(cx, |view, _| {
+                        let command = if view.snapshot.microphone_active {
+                            ClientRequest::StopListening
+                        } else if view.snapshot.state == TurnState::Ready {
+                            ClientRequest::StartListening
+                        } else {
+                            return;
+                        };
+                        view.ipc.send(command);
+                    });
                 }
             })
             .on_click(move |_, _, cx| {
@@ -425,14 +624,21 @@ impl Render for PillView {
 
         if self.fullscreen {
             let rem = f32::from(window.rem_size());
-            self.pill_size = (PILL_WIDTH_REM * rem, PILL_HEIGHT_REM * rem);
-            let panel_size = (PANEL_WIDTH_REM * rem, PANEL_HEIGHT_REM * rem);
             let surface = window.bounds().size;
-            let ready = surface.width > px(1.) && surface.height > px(1.);
-            self.viewport = (f32::from(surface.width), f32::from(surface.height));
+            let ready = surface.width > Pixels::default() && surface.height > Pixels::default();
+            let sw = f32::from(surface.width);
+            let sh = f32::from(surface.height);
+            self.viewport = (sw, sh);
+
+            self.pill_size = (rem * 1.5, rem * 7.5);
+            let panel_size = (rem * 12.0, rem * 6.0);
+            self.panel_size = panel_size;
+
+            let edge_gap = BASE_EDGE_GAP_REM * rem;
+
             if ready && self.position.is_none() {
                 self.position = Some((
-                    (self.viewport.0 - self.pill_size.0 - EDGE_GAP_REM * rem).max(0.0),
+                    (self.viewport.0 - self.pill_size.0 - edge_gap).max(0.0),
                     ((self.viewport.1 - self.pill_size.1) / 2.0).max(0.0),
                 ));
             }
@@ -444,9 +650,9 @@ impl Render for PillView {
             }
             let on_right = x + self.pill_size.0 / 2.0 >= self.viewport.0 / 2.0;
             let panel_x = if on_right {
-                (self.viewport.0 - panel_size.0 - EDGE_GAP_REM * rem).max(0.0)
+                (x + self.pill_size.0 - panel_size.0).max(0.0)
             } else {
-                EDGE_GAP_REM * rem
+                x
             };
             let panel_y = (y + (self.pill_size.1 - panel_size.1) / 2.0)
                 .clamp(0.0, (self.viewport.1 - panel_size.1).max(0.0));
@@ -458,18 +664,24 @@ impl Render for PillView {
             if !ready {
                 window.set_input_region(Some(&[]));
             } else if self.drag_offset.is_none() {
-                window.set_input_region(Some(&[bounds(
+                let mut regions =
+                    self.documents
+                        .regions((x, y), self.pill_size, self.viewport, rem, cx);
+                regions.push(bounds(
                     point(px(input_x), px(input_y)),
                     size(px(input_size.0), px(input_size.1)),
-                )]));
+                ));
+                window.set_input_region(Some(&regions));
             }
+
             let compact_size = self.pill_size;
             let morph = if expanded { 1.0 } else { 0.0 };
+
+            // Snappy and responsive spring for smooth pill expanding & collapsing
             let pill = pill.opacity(if ready { 1.0 } else { 0.0 }).with_spring(
                 "sofia-pill-morph",
-                SpringAnimation::new(SpringConfig::new(240.0, 28.0, 1.0))
+                SpringAnimation::new(SpringConfig::new(320.0, 30.0, 1.0))
                     .to(morph)
-                    .from(0.0)
                     .with_epsilon(0.001),
                 move |this, value| {
                     let value = value.clamp(0.0, 1.0);
@@ -479,9 +691,13 @@ impl Render for PillView {
                         .top(px(mix(y, panel_y)))
                         .w(px(mix(compact_size.0, panel_size.0)))
                         .h(px(mix(compact_size.1, panel_size.1)))
-                        .rounded(px(mix(compact_size.0 / 2.0, rem * 1.75)))
+                        .rounded(px(mix(compact_size.0 / 2.0, rem * 1.25)))
                 },
             );
+
+            let documents = self
+                .documents
+                .render((x, y), self.pill_size, self.viewport, rem, cx);
             let view = cx.entity().downgrade();
             let view_up = cx.entity().downgrade();
             div()
@@ -498,6 +714,7 @@ impl Render for PillView {
                         view.update(cx, |view, cx| view.on_mouse_up(window, cx));
                     }
                 })
+                .children(documents)
                 .child(pill)
                 .into_any_element()
         } else {
@@ -506,8 +723,45 @@ impl Render for PillView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(pill.w_12().h_48())
+                .child(pill.w(rems(1.5)).h(rems(7.5)))
                 .into_any_element()
         }
+    }
+}
+
+fn display_tool_name(name: &str) -> String {
+    let Some(name) = name
+        .strip_prefix("mcp_")
+        .and_then(|name| name.split_once("__").map(|(_, tool)| tool))
+    else {
+        return name.into();
+    };
+    let mut bytes = Vec::new();
+    let mut index = 0;
+    while index < name.len() {
+        if name.as_bytes()[index] == b'_'
+            && index + 3 <= name.len()
+            && name.as_bytes()[index + 1..index + 3]
+                .iter()
+                .all(u8::is_ascii_hexdigit)
+            && let Ok(byte) = u8::from_str_radix(&name[index + 1..index + 3], 16)
+        {
+            bytes.push(byte);
+            index += 3;
+        } else {
+            bytes.push(name.as_bytes()[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| name.into())
+}
+#[cfg(test)]
+mod motion_tests {
+    use super::display_tool_name;
+    #[test]
+    fn tool_labels_hide_namespace_and_preserve_native_names() {
+        assert_eq!(display_tool_name("mcp_search__web_5fsearch"), "web_search");
+        assert_eq!(display_tool_name("native_abc"), "native_abc");
+        assert_eq!(display_tool_name("mcp_server__tool_€"), "tool_€");
     }
 }

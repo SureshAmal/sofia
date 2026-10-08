@@ -5,6 +5,68 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value};
+mod mcp_import;
+mod settings;
+pub use mcp_import::import_mcp_servers;
+pub use settings::*;
+
+pub fn load() -> Result<Settings, String> {
+    let mut settings = load_at(&settings_path()?)?;
+    if !settings
+        .mcp_servers
+        .iter()
+        .any(|server| server.id == "sofia")
+    {
+        if let Ok(executable) = std::env::current_exe() {
+            let command = executable.with_file_name(if cfg!(windows) {
+                "sofia-mcp.exe"
+            } else {
+                "sofia-mcp"
+            });
+            if command.is_file() {
+                settings.mcp_servers.push(McpServerConfig {
+                    name: "Sofia documents".into(),
+                    id: "sofia".into(),
+                    transport: McpTransport::Stdio {
+                        command: command.to_string_lossy().into_owned(),
+                        args: Vec::new(),
+                        env: Default::default(),
+                    },
+                    ..Default::default()
+                });
+            }
+        }
+    }
+    Ok(settings)
+}
+
+fn load_at(path: &Path) -> Result<Settings, String> {
+    match read_root(path)? {
+        Some(value) => serde_json::from_value(value).map_err(|error| error.to_string()),
+        None => Ok(Settings::default()),
+    }
+}
+
+pub fn save(settings: &Settings) -> Result<(), String> {
+    settings.validate()?;
+    let path = settings_path()?;
+    let mut root = read_root(&path)?.unwrap_or_else(|| Value::Object(Map::new()));
+    merge(
+        &mut root,
+        serde_json::to_value(settings).map_err(|error| error.to_string())?,
+    );
+    write_root(&path, &root)
+}
+
+fn merge(target: &mut Value, patch: Value) {
+    if let (Some(object), Value::Object(patch)) = (target.as_object_mut(), &patch) {
+        for (key, value) in patch {
+            merge(object.entry(key).or_insert(Value::Null), value.clone());
+        }
+    } else {
+        *target = patch;
+    }
+}
 
 pub fn settings_path() -> Result<PathBuf, String> {
     #[cfg(unix)]
@@ -78,6 +140,10 @@ fn save_string_at(
     } else {
         section_object.remove(key);
     }
+    write_root(path, &root)
+}
+
+fn write_root(path: &Path, root: &Value) -> Result<(), String> {
     let directory = path
         .parent()
         .ok_or("settings path needs a parent directory")?;
@@ -126,6 +192,36 @@ fn read_root(path: &Path) -> Result<Option<Value>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_choice_defaults_by_key_and_honors_toggle() {
+        let mut settings = Settings::default();
+        assert!(settings.uses_vertex_ai());
+        settings.generative.api_key = "test-key".into();
+        assert!(!settings.uses_vertex_ai());
+        settings.connection.use_vertex_ai = Some(true);
+        assert!(settings.uses_vertex_ai());
+        settings.connection.use_vertex_ai = Some(false);
+        settings.generative.api_key.clear();
+        assert!(!settings.uses_vertex_ai());
+        settings.vertex.location.clear();
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn typed_settings_preserve_unknown_fields_and_load_defaults() {
+        let mut root = serde_json::json!({"custom":42,"audio":{"input_device_id":"user-mic"}});
+        let settings: Settings = serde_json::from_value(root.clone()).unwrap();
+        assert!(settings.audio.auto_listen);
+        assert_eq!(settings.appearance.theme, "system");
+        assert_eq!(settings.assistant.system_prompt, DEFAULT_SYSTEM_PROMPT);
+        merge(&mut root, serde_json::to_value(settings).unwrap());
+        assert_eq!(root["custom"], 42);
+        assert_eq!(root["audio"]["input_device_id"], "user-mic");
+        let mut invalid = Settings::default();
+        invalid.assistant.system_prompt.clear();
+        assert!(invalid.validate().is_err());
+    }
 
     #[test]
     fn output_selection_preserves_other_settings() {

@@ -5,8 +5,9 @@ use std::time::Duration;
 use gemini_live::session::{ReconnectPolicy, Session, SessionConfig};
 use gemini_live::transport::{Auth, Endpoint, TransportConfig};
 use gemini_live::types::{
-    AudioTranscriptionConfig, ClientContent, Content, GenerationConfig, Modality, Part,
-    PrebuiltVoiceConfig, ServerEvent as GeminiEvent, SetupConfig, SpeechConfig, VoiceConfig,
+    AudioTranscriptionConfig, ClientContent, Content, FunctionResponse, GenerationConfig, Modality,
+    Part, PrebuiltVoiceConfig, ServerEvent as GeminiEvent, SetupConfig, SpeechConfig, Tool,
+    VoiceConfig,
 };
 use livesofia::oauth::{GoogleOAuthCredentials, GoogleTokenSource};
 use livesofia::state::EventHub;
@@ -19,6 +20,9 @@ use uuid::Uuid;
 use crate::audio::{AudioChunk, AudioPlayback, MicCapture};
 
 pub enum LiveCommand {
+    ReloadSettings {
+        reply: oneshot::Sender<Result<(), SubmitError>>,
+    },
     SendText {
         text: String,
         reply: oneshot::Sender<Result<(), SubmitError>>,
@@ -52,41 +56,104 @@ pub enum SubmitError {
 }
 
 struct LiveConfig {
-    token_source: GoogleTokenSource,
+    token_source: Option<GoogleTokenSource>,
+    api_key: String,
     project: String,
     location: String,
     model: String,
+    system_prompt: String,
 }
 
 impl LiveConfig {
     fn from_env() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let project = std::env::var("PROJECT_ID")?;
+        let settings = sofia_config::load()?;
+        settings.validate()?;
+        if settings
+            .gemini
+            .voice_name
+            .as_deref()
+            .is_some_and(|name| livesofia::voice::canonical_voice_name(name).is_none())
+        {
+            return Err("Unknown Gemini voice. Choose a supported prebuilt voice.".into());
+        }
+        if !settings.uses_vertex_ai() {
+            let api_key = if settings.generative.api_key.trim().is_empty() {
+                std::env::var("GEMINI_API_KEY").unwrap_or_default()
+            } else {
+                settings.generative.api_key
+            };
+            if api_key.trim().is_empty() {
+                return Err("Gemini API key is required when Vertex AI is disabled.".into());
+            }
+            return Ok(Self {
+                token_source: None,
+                api_key,
+                project: String::new(),
+                location: String::new(),
+                model: settings.generative.model,
+                system_prompt: settings.assistant.system_prompt,
+            });
+        }
+        let vertex = settings.vertex;
+        let setting_or_env = |value: String, key: &str| {
+            if value.trim().is_empty() {
+                std::env::var(key).unwrap_or_default()
+            } else {
+                value
+            }
+        };
+        let project = setting_or_env(vertex.project_id, "PROJECT_ID");
         if project.trim().is_empty() {
             return Err("PROJECT_ID is empty".into());
         }
         Ok(Self {
-            token_source: GoogleTokenSource::new(GoogleOAuthCredentials::from_env()?)?,
+            token_source: Some(GoogleTokenSource::new(GoogleOAuthCredentials::new(
+                setting_or_env(vertex.client_id, "CLIENT_ID"),
+                setting_or_env(vertex.client_secret, "CLIENT_SECRET"),
+                setting_or_env(vertex.refresh_token, "REFRESH_TOKEN"),
+            )?)?),
+            api_key: String::new(),
             project,
-            location: std::env::var("VERTEX_LOCATION").unwrap_or_else(|_| "us-central1".into()),
-            model: std::env::var("VERTEX_MODEL").unwrap_or_else(|_| "gemini-3.8-live".into()),
+            location: vertex.location,
+            model: vertex.model,
+            system_prompt: settings.assistant.system_prompt,
         })
     }
 
     fn session_config(&self, voice_name: Option<&str>) -> SessionConfig {
-        let resource = format!(
-            "projects/{}/locations/{}/publishers/google/models/{}",
-            self.project, self.location, self.model
-        );
-        SessionConfig {
-            transport: TransportConfig {
-                endpoint: Endpoint::VertexAi {
+        let resource = if self.token_source.is_some() {
+            format!(
+                "projects/{}/locations/{}/publishers/google/models/{}",
+                self.project, self.location, self.model
+            )
+        } else {
+            format!("models/{}", self.model.trim_start_matches("models/"))
+        };
+        let (endpoint, auth) = if let Some(source) = &self.token_source {
+            (
+                Endpoint::VertexAi {
                     location: self.location.clone(),
                 },
-                auth: Auth::BearerTokenProvider(self.token_source.bearer_provider()),
+                Auth::BearerTokenProvider(source.bearer_provider()),
+            )
+        } else {
+            (Endpoint::GeminiApi, Auth::ApiKey(self.api_key.clone()))
+        };
+        SessionConfig {
+            transport: TransportConfig {
+                endpoint,
+                auth,
                 ..Default::default()
             },
             setup: SetupConfig {
                 model: resource,
+                system_instruction: Some(Content {
+                    role: None,
+                    parts: vec![Part {
+                        text: Some(self.system_prompt.clone()),
+                        inline_data: None,
+                    }],
+                }),
                 generation_config: Some(GenerationConfig {
                     response_modalities: Some(vec![Modality::Audio]),
                     speech_config: voice_name.map(|name| SpeechConfig {
@@ -111,32 +178,58 @@ impl LiveConfig {
 }
 
 pub async fn run(hub: EventHub, mut commands: mpsc::Receiver<LiveCommand>) {
-    let config = match LiveConfig::from_env() {
-        Ok(config) => config,
-        Err(error) => {
-            hub.set_state(TurnState::Error, None);
-            hub.publish(ServerEvent::Error {
-                message: format!("Live configuration failed: {error}"),
-            });
-            warn!(%error, "Live configuration failed");
-            return;
-        }
-    };
-
     loop {
+        let config = match LiveConfig::from_env() {
+            Ok(config) => config,
+            Err(error) => {
+                hub.set_state(TurnState::Error, None);
+                hub.publish(ServerEvent::Error {
+                    message: format!("Live configuration failed: {error}"),
+                });
+                warn!(%error, "Live configuration failed");
+                while let Some(command) = commands.recv().await {
+                    if let LiveCommand::ReloadSettings { reply } = command {
+                        let _ = reply.send(Ok(()));
+                        break;
+                    }
+                    reject(command, SubmitError::Unavailable);
+                }
+                continue;
+            }
+        };
+
+        if let Ok(settings) = sofia_config::load() {
+            hub.set_output_device(settings.audio.output_device_id);
+            hub.set_gemini_voice(settings.gemini.voice_name);
+        }
         hub.set_state(TurnState::Connecting, None);
+        let mcp_configs = sofia_config::load()
+            .map(|settings| settings.mcp_servers)
+            .unwrap_or_default();
+        let (mcp, reports) = sofia_mcp_client::McpBridge::connect(&mcp_configs).await;
+        for report in reports {
+            info!(server = %report.id, tools = report.tools, "MCP discovery finished");
+            if let Some(error) = report.error {
+                hub.publish(ServerEvent::Error {
+                    message: format!("MCP {}: {error}", report.id),
+                });
+            }
+        }
+        let mcp = std::sync::Arc::new(mcp);
         let selected_voice = hub.snapshot().gemini_voice_name;
-        let connected = tokio::time::timeout(
-            Duration::from_secs(45),
-            Session::connect(config.session_config(selected_voice.as_deref())),
-        )
-        .await;
+        let mut session_config = config.session_config(selected_voice.as_deref());
+        let declarations = mcp.declarations();
+        if !declarations.is_empty() {
+            session_config.setup.tools = Some(vec![Tool::FunctionDeclarations(declarations)]);
+        }
+        let connected =
+            tokio::time::timeout(Duration::from_secs(45), Session::connect(session_config)).await;
         match connected {
             Ok(Ok(session)) => {
                 let session_id = Uuid::new_v4();
                 info!(%session_id, "Gemini Live session ready");
                 hub.set_state(TurnState::Ready, Some(session_id));
-                handle_session(session, session_id, &hub, &mut commands).await;
+                handle_session(session, session_id, &hub, &mut commands, mcp).await;
             }
             Ok(Err(error)) => {
                 warn!(%error, "Gemini Live connection failed");
@@ -169,21 +262,71 @@ async fn handle_session(
     session_id: Uuid,
     hub: &EventHub,
     commands: &mut mpsc::Receiver<LiveCommand>,
+    mcp: std::sync::Arc<sofia_mcp_client::McpBridge>,
 ) {
+    let mut tool_tasks: tokio::task::JoinSet<(String, String, serde_json::Value)> =
+        tokio::task::JoinSet::new();
+    let mut pending_tools = std::collections::HashMap::<String, tokio::task::AbortHandle>::new();
     let mut transcript = AssistantTranscript::new();
     let mut busy = false;
+    let mut paused = false;
     let (audio_sender, mut audio_chunks) = mpsc::channel::<AudioChunk>(8);
-    let mut microphone: Option<MicCapture> = None;
+    let auto_listen = sofia_config::load()
+        .map(|settings| settings.audio.auto_listen)
+        .unwrap_or(true);
+    let mut microphone = if auto_listen {
+        match MicCapture::start(audio_sender.clone()).await {
+            Ok(capture) => {
+                hub.set_microphone_active(true);
+                hub.set_state(TurnState::Listening, Some(session_id));
+                Some(capture)
+            }
+            Err(error) => {
+                hub.publish(ServerEvent::Error {
+                    message: format!("Microphone could not start: {error}"),
+                });
+                None
+            }
+        }
+    } else {
+        None
+    };
     let mut playback: Option<AudioPlayback> = None;
     let mut speaker_muted = hub.snapshot().speaker_muted;
     let mut selected_output_device_id = hub.snapshot().selected_output_device_id;
     let mut audio_level_counter = 0_u8;
     let mut last_output_spectrum: Option<tokio::time::Instant> = None;
-    let mut mic_turn_deadline: Option<tokio::time::Instant> = None;
+    let mut audio_health = tokio::time::interval(Duration::from_millis(250));
     loop {
         tokio::select! {
+            Some(result) = tool_tasks.join_next(), if !tool_tasks.is_empty() => {
+                if let Ok((id, name, response)) = result {
+                    pending_tools.remove(&id);
+                    if paused { continue; }
+                    let success = response.get("isError").and_then(serde_json::Value::as_bool) != Some(true);
+                    hub.publish(ServerEvent::ToolCallFinished { call_id: id.clone(), name: name.clone(), success });
+                    if let Err(error) = session.send_tool_response(vec![FunctionResponse { id, name, response }]).await {
+                        warn!(%error,"MCP result could not be sent to Gemini");
+                        break;
+                    }
+                    if pending_tools.is_empty() { hub.set_state(TurnState::Thinking, Some(session_id)); }
+                }
+            }
+            _ = audio_health.tick() => {
+                if microphone.as_ref().is_some_and(MicCapture::has_stopped) {
+                    microphone.take();
+                    hub.set_microphone_active(false);
+                    hub.publish(ServerEvent::Error { message: "Microphone stream stopped unexpectedly; start listening again.".into() });
+                    busy = false;
+                    hub.set_state(TurnState::Ready, Some(session_id));
+                }
+            }
             Some(command) = commands.recv() => {
                 match command {
+                    LiveCommand::ReloadSettings { reply } => {
+                        let _ = reply.send(Ok(()));
+                        break;
+                    }
                     LiveCommand::SendText { text, reply } => {
                         if reply.is_closed() {
                             continue;
@@ -192,6 +335,7 @@ async fn handle_session(
                             let _ = reply.send(Err(SubmitError::Busy));
                             continue;
                         }
+                        paused = false;
                         let result = session.send_client_content(ClientContent {
                             turns: Some(vec![Content {
                                 role: Some("user".into()),
@@ -215,14 +359,18 @@ async fn handle_session(
                     }
                     LiveCommand::StartListening { reply } => {
                         if reply.is_closed() { continue; }
-                        if busy || microphone.is_some() {
+                        if microphone.is_some() {
+                            let _ = reply.send(Ok(()));
+                            continue;
+                        }
+                        if busy {
                             let _ = reply.send(Err(SubmitError::Busy));
                             continue;
                         }
                         match MicCapture::start(audio_sender.clone()).await {
                             Ok(capture) => {
+                                paused = false;
                                 microphone = Some(capture);
-                                busy = true;
                                 hub.set_microphone_active(true);
                                 hub.set_state(TurnState::Listening, Some(session_id));
                                 let _ = reply.send(Ok(()));
@@ -235,30 +383,22 @@ async fn handle_session(
                         }
                     }
                     LiveCommand::StopListening { reply } => {
+                        paused = true;
+                        tool_tasks.abort_all();
+                        pending_tools.clear();
+                        busy = false;
+                        if let Some(player) = playback.as_ref() { player.clear(); }
                         let Some(capture) = microphone.take() else {
-                            let _ = reply.send(Err(SubmitError::Unavailable));
+                            hub.set_state(TurnState::Ready, Some(session_id));
+                            let _ = reply.send(Ok(()));
                             continue;
                         };
-                        let capture_id = capture.id;
                         capture.finish().await;
                         hub.set_microphone_active(false);
-                        let mut send_failed = false;
-                        while let Ok(chunk) = audio_chunks.try_recv() {
-                            if chunk.capture_id == capture_id
-                                && let Err(error) = session.send_audio_at_rate(&chunk.pcm, chunk.sample_rate).await {
-                                    warn!(%error, "final microphone audio send failed");
-                                    send_failed = true;
-                                    break;
-                                }
-                        }
-                        if send_failed {
-                            let _ = reply.send(Err(SubmitError::Unavailable));
-                            break;
-                        }
+                        while audio_chunks.try_recv().is_ok() {}
                         match session.audio_stream_end().await {
                             Ok(()) => {
-                                hub.set_state(TurnState::Thinking, Some(session_id));
-                                mic_turn_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(15));
+                                hub.set_state(TurnState::Ready, Some(session_id));
                                 let _ = reply.send(Ok(()));
                             }
                             Err(error) => {
@@ -302,7 +442,7 @@ async fn handle_session(
                     }
                     LiveCommand::SelectGeminiVoice { voice_name, reply } => {
                         if reply.is_closed() { continue; }
-                        if busy || microphone.is_some() || playback.as_ref().is_some_and(|player| !player.is_idle()) {
+                        if busy || playback.as_ref().is_some_and(|player| !player.is_idle()) {
                             let _ = reply.send(Err(SubmitError::Busy));
                             continue;
                         }
@@ -339,25 +479,17 @@ async fn handle_session(
                     });
                 }
             }
-            _ = async {
-                if let Some(deadline) = mic_turn_deadline {
-                    tokio::time::sleep_until(deadline).await;
-                } else {
-                    std::future::pending::<()>().await;
-                }
-            } => {
-                mic_turn_deadline = None;
-                busy = false;
-                hub.set_state(TurnState::Ready, Some(session_id));
-            }
             event = session.next_event() => {
                 let Some(event) = event else { break };
+                if paused && !matches!(event, GeminiEvent::Error(_) | GeminiEvent::Closed { .. }) {
+                    continue;
+                }
                 if let Some(text_event) = transcript.observe(&event) {
                     hub.publish(text_event);
                 }
                 match event {
                     GeminiEvent::ModelAudio(bytes) => {
-                        mic_turn_deadline = None;
+                        busy = true;
                         hub.set_state(TurnState::Speaking, Some(session_id));
                         let now = tokio::time::Instant::now();
                         if last_output_spectrum.is_none_or(|last| now.duration_since(last) >= Duration::from_millis(80)) {
@@ -381,28 +513,46 @@ async fn handle_session(
                             if let Some(player) = playback.as_ref()
                                 && let Err(error) = player.push_pcm(&bytes) {
                                     hub.publish(ServerEvent::Error { message: format!("Speaker playback failed: {error}") });
+                                    speaker_muted = true;
+                                    hub.set_speaker_muted(true);
+                                    playback = None;
                             }
                         }
                     }
                     GeminiEvent::OutputTranscription(_) => {
-                        mic_turn_deadline = None;
                         hub.set_state(TurnState::Speaking, Some(session_id));
                     }
                     GeminiEvent::InputTranscription(text) => hub.publish(ServerEvent::InputText { text }),
                     GeminiEvent::ToolCall(calls) => {
+                        busy = true;
                         hub.set_state(TurnState::ToolQueued, Some(session_id));
                         for call in calls {
-                            hub.publish(ServerEvent::ToolCallRequested { call_id: call.id, name: call.name });
+                            hub.publish(ServerEvent::ToolCallRequested { call_id: call.id.clone(), name: call.name.clone() });
+                            if pending_tools.contains_key(&call.id) { continue; }
+                            if pending_tools.len() >= 32 {
+                                let _ = session.send_tool_response(vec![FunctionResponse { id: call.id, name: call.name, response: serde_json::json!({"isError":true,"error":"Too many simultaneous tool calls"}) }]).await;
+                                continue;
+                            }
+                            let bridge = mcp.clone();
+                            let id = call.id.clone();
+                            let task = tool_tasks.spawn(async move {
+                                let response = bridge.call(&call.name,call.args).await;
+                                (call.id,call.name,response)
+                            });
+                            pending_tools.insert(id,task);
                         }
+                        hub.set_state(TurnState::ToolRunning, Some(session_id));
+                    }
+                    GeminiEvent::ToolCallCancellation(ids) => {
+                        for id in ids { if let Some(task) = pending_tools.remove(&id) { task.abort(); } }
                     }
                     GeminiEvent::TurnComplete | GeminiEvent::Interrupted => {
-                        mic_turn_deadline = None;
                         if matches!(event, GeminiEvent::Interrupted)
                             && let Some(player) = playback.as_ref() {
                                 player.clear();
                         }
-                        busy = microphone.is_some();
-                        hub.set_state(if busy { TurnState::Listening } else { TurnState::Ready }, Some(session_id));
+                        busy = false;
+                        hub.set_state(if microphone.is_some() { TurnState::Listening } else { TurnState::Ready }, Some(session_id));
                     }
                     GeminiEvent::Error(error) => {
                         hub.publish(ServerEvent::Error { message: error.message });
@@ -427,6 +577,7 @@ fn reject(command: LiveCommand, reason: SubmitError) {
         LiveCommand::SendText { reply, .. }
         | LiveCommand::StartListening { reply }
         | LiveCommand::StopListening { reply }
+        | LiveCommand::ReloadSettings { reply }
         | LiveCommand::SetSpeakerMuted { reply, .. }
         | LiveCommand::SelectAudioOutput { reply, .. }
         | LiveCommand::SelectGeminiVoice { reply, .. } => {
@@ -440,15 +591,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn api_key_mode_uses_generative_endpoint_and_model_resource() {
+        let config = LiveConfig {
+            token_source: None,
+            api_key: "test-key".into(),
+            project: String::new(),
+            location: String::new(),
+            model: "models/test-live".into(),
+            system_prompt: sofia_config::DEFAULT_SYSTEM_PROMPT.into(),
+        };
+        let session = config.session_config(Some("Kore"));
+        assert_eq!(session.transport.endpoint, Endpoint::GeminiApi);
+        assert!(matches!(session.transport.auth, Auth::ApiKey(ref key) if key == "test-key"));
+        assert_eq!(session.setup.model, "models/test-live");
+    }
+
+    #[test]
     fn selected_voice_is_sent_in_live_setup() {
         let credentials = GoogleOAuthCredentials::new("client", "secret", "refresh").unwrap();
         let config = LiveConfig {
-            token_source: GoogleTokenSource::new(credentials).unwrap(),
+            token_source: Some(GoogleTokenSource::new(credentials).unwrap()),
+            api_key: String::new(),
             project: "project".into(),
             location: "us-central1".into(),
             model: "gemini-3.8-live".into(),
+            system_prompt: sofia_config::DEFAULT_SYSTEM_PROMPT.into(),
         };
         let session = config.session_config(Some("Kore"));
+        assert!(matches!(
+            session.transport.endpoint,
+            Endpoint::VertexAi { .. }
+        ));
+        assert!(matches!(
+            session.transport.auth,
+            Auth::BearerTokenProvider(_)
+        ));
+        assert_eq!(
+            session.setup.system_instruction.as_ref().unwrap().parts[0]
+                .text
+                .as_deref(),
+            Some(sofia_config::DEFAULT_SYSTEM_PROMPT)
+        );
         let voice = session
             .setup
             .generation_config

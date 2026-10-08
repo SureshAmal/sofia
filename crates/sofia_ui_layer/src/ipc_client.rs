@@ -102,7 +102,7 @@ where
         stream,
         LinesCodec::new_with_max_length(sofia_protocol::MAX_MESSAGE_BYTES),
     );
-    request(
+    let hello = request(
         &mut framed,
         ClientRequest::Hello {
             client_name: "sofia-ui-pill".into(),
@@ -111,17 +111,37 @@ where
         updates,
     )
     .await?;
+    if !matches!(hello, ServerBody::Hello { .. }) {
+        return Err("unexpected IPC handshake reply".into());
+    }
     let snapshot = request(&mut framed, ClientRequest::GetSnapshot, updates).await?;
     if let ServerBody::Snapshot(snapshot) = snapshot {
         updates.send(UiUpdate::Snapshot(snapshot))?;
+    } else {
+        return Err("unexpected IPC snapshot reply".into());
     }
-    request(&mut framed, ClientRequest::SubscribeEvents, updates).await?;
+    let subscription = request(&mut framed, ClientRequest::SubscribeEvents, updates).await?;
+    let ServerBody::Subscribed { next_sequence } = subscription else {
+        return Err("unexpected IPC subscription reply".into());
+    };
+    let mut expected_sequence = next_sequence;
 
     loop {
         tokio::select! {
             message = framed.next() => {
                 let Some(line) = message else { return Err("IPC connection closed".into()); };
-                handle_message(serde_json::from_str(&line?)?, updates)?;
+                let message: ServerMessage = serde_json::from_str(&line?)?;
+                validate_version(&message)?;
+                if matches!(message.body, ServerBody::Event(_)) {
+                    if message.sequence != Some(expected_sequence) {
+                        return Err("IPC event gap; reconnecting for a fresh snapshot".into());
+                    }
+                    expected_sequence += 1;
+                }
+                if matches!(message.body, ServerBody::Error(ref error) if error.code == sofia_protocol::ErrorCode::ResyncRequired) {
+                    return Err("IPC resync requested; reconnecting for a fresh snapshot".into());
+                }
+                handle_message(message, updates)?;
             }
             Some(command) = commands.recv() => {
                 let message = ClientMessage::new(command);
@@ -144,11 +164,24 @@ where
     loop {
         let line = framed.next().await.ok_or("IPC connection closed")??;
         let reply: ServerMessage = serde_json::from_str(&line)?;
+        validate_version(&reply)?;
         if reply.request_id == Some(message.request_id) {
+            if let ServerBody::Error(error) = &reply.body {
+                return Err(error.message.clone().into());
+            }
             return Ok(reply.body);
         }
         handle_message(reply, updates)?;
     }
+}
+
+fn validate_version(
+    message: &ServerMessage,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if message.version != sofia_protocol::PROTOCOL_VERSION {
+        return Err(format!("unsupported IPC version: {}", message.version).into());
+    }
+    Ok(())
 }
 
 fn handle_message(

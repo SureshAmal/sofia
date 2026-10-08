@@ -17,7 +17,9 @@ pub fn pcm_i16_bands(pcm: &[u8], sample_rate: u32) -> Vec<f32> {
         return vec![0.0; BANDS];
     }
     let samples = pcm
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.0)
         .collect::<Vec<_>>();
     bands(&samples, sample_rate)

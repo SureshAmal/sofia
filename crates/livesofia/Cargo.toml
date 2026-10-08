@@ -14,6 +14,7 @@ rustfft.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 sofia-config = { workspace = true }
+sofia-mcp-client.workspace = true
 sofia-protocol = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }

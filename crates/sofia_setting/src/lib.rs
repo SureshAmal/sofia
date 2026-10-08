@@ -1,8 +1,27 @@
-//! GPUI Kit settings application boundary.
-//!
-//! The shared settings file API is implemented in `sofia-config`.
+mod mcp;
+// Sofia settings desktop application.
+mod view;
+pub use sofia_ui_layer::theme::apply as apply_theme;
+pub use view::SettingsView;
 
-pub use sofia_config::{
-    load_gemini_voice_name, load_output_device_id, save_gemini_voice_name, save_output_device_id,
-    settings_path,
-};
+#[cfg(test)]
+mod tests {
+    use gpui_kit::{
+        AssetSource,
+        assets::{Assets, IconName},
+    };
+    #[test]
+    fn bundled_settings_icons_are_available() {
+        for icon in [
+            IconName::Bot,
+            IconName::Network,
+            IconName::Mic,
+            IconName::Palette,
+            IconName::Search,
+            IconName::Undo2,
+            IconName::ChevronDown,
+        ] {
+            assert!(Assets.load(&icon.path()).unwrap().is_some());
+        }
+    }
+}

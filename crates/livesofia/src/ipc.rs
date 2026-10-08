@@ -209,6 +209,9 @@ where
                 ClientRequest::StopListening => {
                     submit_command(&commands, |reply| LiveCommand::StopListening { reply }).await
                 }
+                ClientRequest::ReloadSettings => {
+                    submit_command(&commands, |reply| LiveCommand::ReloadSettings { reply }).await
+                }
                 ClientRequest::SetSpeakerMuted { muted } => {
                     submit_command(&commands, |reply| LiveCommand::SetSpeakerMuted {
                         muted,
@@ -257,6 +260,14 @@ where
                             reply,
                         })
                         .await
+                    }
+                }
+                ClientRequest::ContentChanged { id } => {
+                    if uuid::Uuid::parse_str(&id).is_err() {
+                        protocol_error(ErrorCode::BadRequest, "Invalid document ID")
+                    } else {
+                        hub.publish(sofia_protocol::ServerEvent::ContentChanged { id });
+                        ServerBody::Accepted
                     }
                 }
                 ClientRequest::Ping => ServerBody::Pong,

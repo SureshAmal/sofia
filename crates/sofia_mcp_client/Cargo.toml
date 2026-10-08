@@ -1,14 +1,13 @@
 [package]
-name = "sofia-ui-layer"
+name = "sofia-mcp-client"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 futures-util.workspace = true
-gpui-kit.workspace = true
+gemini-live.workspace = true
+reqwest.workspace = true
+rmcp.workspace = true
 serde_json.workspace = true
 sofia-config.workspace = true
-sofia-content.workspace = true
-sofia-protocol.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true

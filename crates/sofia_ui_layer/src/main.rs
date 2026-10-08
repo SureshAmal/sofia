@@ -1,4 +1,4 @@
-use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::*;
 use sofia_ui_layer::pill::PillView;
 
@@ -6,25 +6,30 @@ use sofia_ui_layer::pill::PillView;
 fn main() {
     // A layer surface requires the Wayland backend. Refuse X11 rather than
     // allowing the compositor to tile Sofia as an ordinary application window.
-    gpui_kit::platform::linux(WindowingModes::WAYLAND).run(|cx| {
-        gpui_kit::init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
-        open_pill(pill_window_options(cx), cx).expect("open Wayland Sofia layer");
-    });
+    gpui_kit::platform::linux(WindowingModes::WAYLAND)
+        .with_assets(gpui_kit::assets::Assets)
+        .run(|cx| {
+            gpui_kit::init(cx);
+            sofia_ui_layer::theme::init(cx);
+            open_pill(pill_window_options(cx), cx).expect("open Wayland Sofia layer");
+        });
 }
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
-    application().run(|cx| {
-        gpui_kit::init(cx);
-        Theme::change(ThemeMode::Dark, None, cx);
-        open_pill(pill_window_options(cx), cx).expect("open Sofia pill");
-    });
+    application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(|cx| {
+            gpui_kit::init(cx);
+            sofia_ui_layer::theme::init(cx);
+            open_pill(pill_window_options(cx), cx).expect("open Sofia pill");
+        });
 }
 
 fn open_pill(options: WindowOptions, cx: &mut App) -> Result<(), Box<dyn std::error::Error>> {
     let fullscreen = matches!(options.kind, WindowKind::LayerShell(_));
     cx.open_window(options, |window, cx| {
+        sofia_ui_layer::theme::observe(window, cx);
         window.set_rem_size(cx.theme().font_size);
         cx.new(|cx| PillView::new(cx, fullscreen))
     })?;
@@ -48,7 +53,7 @@ fn pill_window_options(cx: &App) -> WindowOptions {
             namespace: "sofia-pill".into(),
             layer: Layer::Overlay,
             anchor: Anchor::TOP | Anchor::RIGHT | Anchor::BOTTOM | Anchor::LEFT,
-            keyboard_interactivity: KeyboardInteractivity::None,
+            keyboard_interactivity: KeyboardInteractivity::OnDemand,
             ..Default::default()
         }),
         window_background: WindowBackgroundAppearance::Transparent,
