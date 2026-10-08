@@ -1,6 +1,7 @@
 //! Native GPUI Kit presenters in the existing desktop layer.
+use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme, Icon, IconName,
+    ActiveTheme, Icon,
     button::Button,
     chart::{BarChart, LineChart},
     checkbox::Checkbox,
