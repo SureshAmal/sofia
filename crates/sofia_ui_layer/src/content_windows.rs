@@ -574,27 +574,34 @@ impl Render for DocumentView {
                             .child(self.doc.title.clone()),
                     )
                     .child(
-                        Button::new("edit")
-                            .child(Icon::new(if self.editing {
-                                IconName::Eye
-                            } else {
-                                IconName::Pencil
-                            }))
-                            .opacity(0.)
-                            .hover(|style| style.opacity(1.))
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.editing = !view.editing;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("close")
-                            .child(Icon::new(IconName::X))
-                            .opacity(0.)
-                            .hover(|style| style.opacity(1.))
-                            .on_click(cx.listener(|view, _, _, _| {
-                                let _ = view.commands.send(Command::Close(view.doc.id.clone()));
-                            })),
+                        div()
+                            .group("window-actions")
+                            .flex()
+                            .gap_1()
+                            .child(
+                                Button::new("edit")
+                                    .child(Icon::new(if self.editing {
+                                        IconName::Eye
+                                    } else {
+                                        IconName::Pencil
+                                    }))
+                                    .opacity(0.)
+                                    .group_hover("window-actions", |style| style.opacity(1.))
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.editing = !view.editing;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("close")
+                                    .child(Icon::new(IconName::X))
+                                    .opacity(0.)
+                                    .group_hover("window-actions", |style| style.opacity(1.))
+                                    .on_click(cx.listener(|view, _, _, _| {
+                                        let _ =
+                                            view.commands.send(Command::Close(view.doc.id.clone()));
+                                    })),
+                            ),
                     ),
             )
             .child(div().flex_1().min_h_0().overflow_hidden().child(body));
