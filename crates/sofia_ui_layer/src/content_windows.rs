@@ -1,7 +1,7 @@
 //! Native GPUI Kit presenters in the existing desktop layer.
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme,
+    ActiveTheme, Icon,
     button::Button,
     chart::{BarChart, LineChart},
     checkbox::Checkbox,
@@ -575,25 +575,32 @@ impl Render for DocumentView {
                             .child(self.doc.title.clone()),
                     )
                     .child(
-                        Button::new("edit")
-                            .icon(if self.editing {
-                                IconName::Eye
-                            } else {
-                                IconName::Pencil
-                            })
-                            .text_color(cx.theme().foreground)
-                            .on_click(cx.listener(|view, _, _, cx| {
-                                view.editing = !view.editing;
-                                cx.notify();
-                            })),
+                        div()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _, _, cx| {
+                                    view.editing = !view.editing;
+                                    cx.notify();
+                                }),
+                            )
+                            .child(
+                                Icon::new(if self.editing {
+                                    IconName::Eye
+                                } else {
+                                    IconName::Pencil
+                                })
+                                .text_color(cx.theme().foreground),
+                            ),
                     )
                     .child(
-                        Button::new("close")
-                            .icon(IconName::X)
-                            .text_color(cx.theme().foreground)
-                            .on_click(cx.listener(|view, _, _, _| {
-                                let _ = view.commands.send(Command::Close(view.doc.id.clone()));
-                            })),
+                        div()
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|view, _, _, _| {
+                                    let _ = view.commands.send(Command::Close(view.doc.id.clone()));
+                                }),
+                            )
+                            .child(Icon::new(IconName::X).text_color(cx.theme().foreground)),
                     ),
             )
             .child(div().flex_1().min_h_0().overflow_hidden().child(body));
