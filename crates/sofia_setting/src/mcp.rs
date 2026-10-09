@@ -1,11 +1,12 @@
 use gpui_kit::component::{
+    ActiveTheme,
     button::Button,
     input::{Textarea, TextareaState},
     switch::Switch,
 };
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use sofia_config::{McpOAuth, McpServerConfig, McpTransport};
-use std::{sync::mpsc, time::Duration};
 
 pub struct McpPanel {
     servers: Vec<Entity<ServerCard>>,
@@ -17,8 +18,6 @@ struct ServerCard {
     tools: Vec<String>,
     status: String,
     pending: bool,
-    results: mpsc::Receiver<CardResult>,
-    sender: mpsc::Sender<CardResult>,
 }
 enum CardResult {
     Tools(Result<Vec<String>, String>),
@@ -85,63 +84,42 @@ impl McpPanel {
     }
 }
 impl ServerCard {
-    fn new(config: McpServerConfig, cx: &mut Context<Self>) -> Self {
-        let (sender, results) = mpsc::channel();
-        cx.spawn(async move |view, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(200))
-                    .await;
-                if view
-                    .update(cx, |view, cx| {
-                        if let Ok(result) = view.results.try_recv() {
-                            view.pending = false;
-                            match result {
-                                CardResult::Tools(Ok(tools)) => {
-                                    view.status = format!("{} tools available", tools.len());
-                                    view.tools = tools;
-                                }
-                                CardResult::Tools(Err(error)) | CardResult::OAuth(Err(error)) => {
-                                    view.status = error
-                                }
-                                CardResult::OAuth(Ok(oauth)) => {
-                                    if let McpTransport::Http {
-                                        oauth: current @ Some(_),
-                                        ..
-                                    } = &mut view.config.transport
-                                    {
-                                        *current = Some(oauth);
-                                    }
-                                    view.status =
-                                        match sofia_config::upsert_mcp_server(&view.config) {
-                                            Ok(()) => {
-                                                "Authenticated · restart Sofia to connect".into()
-                                            }
-                                            Err(error) => format!(
-                                                "Authenticated, but could not save: {error}"
-                                            ),
-                                        };
-                                }
-                            }
-                            cx.notify();
-                        }
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .detach();
+    fn new(config: McpServerConfig, _cx: &mut Context<Self>) -> Self {
         Self {
             config,
             tools: vec![],
             status: "Ready to test".into(),
             pending: false,
-            results,
-            sender,
         }
     }
+
+    fn apply_result(&mut self, result: CardResult, cx: &mut Context<Self>) {
+        self.pending = false;
+        match result {
+            CardResult::Tools(Ok(tools)) => {
+                self.status = format!("{} tools available", tools.len());
+                self.tools = tools;
+            }
+            CardResult::Tools(Err(error)) | CardResult::OAuth(Err(error)) => {
+                self.status = error;
+            }
+            CardResult::OAuth(Ok(oauth)) => {
+                if let McpTransport::Http {
+                    oauth: current @ Some(_),
+                    ..
+                } = &mut self.config.transport
+                {
+                    *current = Some(oauth);
+                }
+                self.status = match sofia_config::upsert_mcp_server(&self.config) {
+                    Ok(()) => "Authenticated · restart Sofia to connect".into(),
+                    Err(error) => format!("Authenticated, but could not save: {error}"),
+                };
+            }
+        }
+        cx.notify();
+    }
+
     fn test(&mut self, cx: &mut Context<Self>) {
         if self.pending {
             return;
@@ -150,27 +128,37 @@ impl ServerCard {
         config.enabled = true;
         self.pending = true;
         self.status = "Connecting…".into();
-        let sender = self.sender.clone();
-        std::thread::spawn(move || {
-            let result = tokio::runtime::Runtime::new()
-                .map_err(|_| "Cannot start MCP test runtime".into())
-                .and_then(|runtime| {
-                    runtime.block_on(async {
-                        sofia_mcp_client::ConnectedServer::connect(&config)
-                            .await
-                            .map(|server| {
-                                server
-                                    .tools
-                                    .iter()
-                                    .map(|tool| tool.name.to_string())
-                                    .collect()
-                            })
-                    })
-                });
-            let _ = sender.send(CardResult::Tools(result));
-        });
         cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    tokio::runtime::Runtime::new()
+                        .map_err(|_| "Cannot start MCP test runtime".into())
+                        .and_then(|runtime| {
+                            runtime.block_on(async {
+                                sofia_mcp_client::ConnectedServer::connect(&config)
+                                    .await
+                                    .map(|server| {
+                                        server
+                                            .tools
+                                            .iter()
+                                            .map(|tool| tool.name.to_string())
+                                            .collect()
+                                    })
+                            })
+                        })
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.apply_result(CardResult::Tools(result), cx);
+            });
+        })
+        .detach();
     }
+
     fn authenticate(&mut self, cx: &mut Context<Self>) {
         if self.pending {
             return;
@@ -178,16 +166,25 @@ impl ServerCard {
         self.pending = true;
         self.status = "Opening browser…".into();
         let config = self.config.clone();
-        let sender = self.sender.clone();
-        std::thread::spawn(move || {
-            let result = tokio::runtime::Runtime::new()
-                .map_err(|_| "Cannot start OAuth runtime".into())
-                .and_then(|runtime| {
-                    runtime.block_on(sofia_mcp_client::authenticate_oauth(&config))
-                });
-            let _ = sender.send(CardResult::OAuth(result));
-        });
         cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    tokio::runtime::Runtime::new()
+                        .map_err(|_| "Cannot start OAuth runtime".into())
+                        .and_then(|runtime| {
+                            runtime.block_on(sofia_mcp_client::authenticate_oauth(&config))
+                        })
+                })
+                .await;
+
+            let _ = this.update(cx, |this, cx| {
+                this.apply_result(CardResult::OAuth(result), cx);
+            });
+        })
+        .detach();
     }
 }
 impl Render for ServerCard {
@@ -212,20 +209,20 @@ impl Render for ServerCard {
         let mut content = div()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
+            .py_2()
             .child(
                 div()
                     .flex()
                     .items_center()
                     .justify_between()
-                    .gap_4()
+                    .gap_3()
                     .child(
                         div()
                             .flex()
                             .flex_col()
-                            .gap_1()
                             .child(title)
-                            .child(div().text_sm().child(transport)),
+                            .child(div().text_xs().text_color(cx.theme().muted_foreground).child(transport)),
                     )
                     .child(
                         Switch::new("enabled")
@@ -241,7 +238,7 @@ impl Render for ServerCard {
                 div()
                     .flex()
                     .items_center()
-                    .gap_3()
+                    .gap_2()
                     .child(
                         Button::new("test")
                             .label(if self.pending {
@@ -251,29 +248,33 @@ impl Render for ServerCard {
                             })
                             .on_click(cx.listener(|view, _, _, cx| view.test(cx))),
                     )
-                    .child(div().text_sm().child(self.status.clone())),
+                    .when(uses_oauth, |this| {
+                        this.child(
+                            Button::new("authenticate")
+                                .label("Authenticate")
+                                .on_click(cx.listener(|view, _, _, cx| view.authenticate(cx))),
+                        )
+                    })
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(self.status.clone())),
             );
-        if uses_oauth {
-            content = content.child(
-                Button::new("authenticate")
-                    .label("Authenticate")
-                    .on_click(cx.listener(|view, _, _, cx| view.authenticate(cx))),
-            );
-        }
-        for name in &self.tools {
-            let tool = name.clone();
-            content = content.child(
-                Switch::new(SharedString::from(name.clone()))
-                    .label(name.clone())
-                    .checked(!self.config.disabled_tools.contains(name))
-                    .on_click(cx.listener(move |view, enabled: &bool, _, cx| {
-                        view.config.disabled_tools.retain(|name| name != &tool);
-                        if !enabled {
-                            view.config.disabled_tools.push(tool.clone());
-                        }
-                        cx.notify();
-                    })),
-            );
+        if !self.tools.is_empty() {
+            let mut tools_list = div().flex().flex_col().gap_1().pt_1();
+            for name in &self.tools {
+                let tool = name.clone();
+                tools_list = tools_list.child(
+                    Switch::new(SharedString::from(name.clone()))
+                        .label(name.clone())
+                        .checked(!self.config.disabled_tools.contains(name))
+                        .on_click(cx.listener(move |view, enabled: &bool, _, cx| {
+                            view.config.disabled_tools.retain(|name| name != &tool);
+                            if !enabled {
+                                view.config.disabled_tools.push(tool.clone());
+                            }
+                            cx.notify();
+                        })),
+                );
+            }
+            content = content.child(tools_list);
         }
         content
     }
@@ -285,8 +286,8 @@ impl Render for McpPanel {
             .max_w(rems(48.))
             .flex()
             .flex_col()
-            .gap_4()
-            .child("Paste MCP JSON")
+            .gap_3()
+            .child(div().text_sm().child("Paste MCP JSON"))
             .child(Textarea::new(&self.json).w_full())
             .child(
                 div()
@@ -298,18 +299,17 @@ impl Render for McpPanel {
                             .label("Add servers")
                             .on_click(cx.listener(|view, _, window, cx| view.import(window, cx))),
                     )
-                    .child(div().text_sm().child(self.status.clone())),
+                    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(self.status.clone())),
             );
         for (index, server) in self.servers.iter().enumerate() {
             content = content.child(
                 div()
                     .flex()
                     .flex_col()
-                    .gap_3()
-                    .py_4()
+                    .gap_1()
                     .child(server.clone())
                     .child(
-                        div().flex().child(
+                        div().flex().justify_end().child(
                             Button::new(("remove-server", index))
                                 .label("Remove")
                                 .on_click(cx.listener(move |view, _, _, cx| {
@@ -321,7 +321,7 @@ impl Render for McpPanel {
             );
         }
         if self.servers.is_empty() {
-            content = content.child("No MCP servers added yet.");
+            content = content.child(div().text_xs().text_color(cx.theme().muted_foreground).child("No MCP servers added yet."));
         }
         content
     }

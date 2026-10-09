@@ -11,8 +11,6 @@ use gpui_kit::*;
 use sofia_config::Settings;
 use sofia_protocol::{ClientRequest, ServerEvent};
 use sofia_ui_layer::ipc_client::{IpcClient, UiUpdate};
-use std::sync::mpsc::Receiver;
-use std::time::Duration;
 type Picker = Entity<SelectState<SearchableVec<SharedString>>>;
 const RADII: [(&str, Option<u8>); 5] = [
     ("Default", None),
@@ -38,7 +36,6 @@ pub struct SettingsView {
     status: String,
     connected: bool,
     ipc: IpcClient,
-    updates: Receiver<UiUpdate>,
 }
 const LABELS: [&str; 6] = [
     "Project ID",
@@ -175,23 +172,29 @@ impl SettingsView {
         .detach();
         let (ipc, updates) = IpcClient::start();
         cx.spawn(async move |view, cx| {
+            let updates = std::sync::Arc::new(std::sync::Mutex::new(updates));
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(200))
+                let rx = updates.clone();
+                let update = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let guard = rx.lock().unwrap();
+                        guard.recv().ok()
+                    })
                     .await;
+
+                let Some(update) = update else { break; };
                 if view
                     .update(cx, |view, cx| {
-                        while let Ok(update) = view.updates.try_recv() {
-                            match update {
-                                UiUpdate::Snapshot(_) => view.connected = true,
-                                UiUpdate::Disconnected => view.connected = false,
-                                UiUpdate::Event(ServerEvent::Error { message }) => {
-                                    view.status = message
-                                }
-                                _ => {}
+                        match update {
+                            UiUpdate::Snapshot(_) => view.connected = true,
+                            UiUpdate::Disconnected => view.connected = false,
+                            UiUpdate::Event(ServerEvent::Error { message }) => {
+                                view.status = message;
                             }
-                            cx.notify();
+                            _ => {}
                         }
+                        cx.notify();
                     })
                     .is_err()
                 {
@@ -218,7 +221,6 @@ impl SettingsView {
             status,
             connected: false,
             ipc,
-            updates,
         }
     }
     fn save_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
