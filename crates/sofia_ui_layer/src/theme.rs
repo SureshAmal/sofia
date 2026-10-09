@@ -16,6 +16,22 @@ pub fn apply(name: &str, window: Option<&mut Window>, cx: &mut App) {
             }
         }
     }
+    if let Ok(settings) = sofia_config::load() {
+        apply_appearance(&settings.appearance, cx);
+    }
+}
+
+pub fn apply_appearance(appearance: &sofia_config::AppearanceSettings, cx: &mut App) {
+    Theme::update(cx, |theme| {
+        theme.font_family = appearance
+            .font_family
+            .as_deref()
+            .unwrap_or(".SystemUIFont")
+            .into();
+        let radius = appearance.radius.unwrap_or(6) as f32;
+        theme.radius = px(radius);
+        theme.radius_lg = px(radius + 2.);
+    });
 }
 
 pub fn apply_saved(window: Option<&mut Window>, cx: &mut App) {
@@ -48,6 +64,9 @@ pub fn observe(window: &mut Window, cx: &mut App) {
                 .unwrap_or(true)
             {
                 Theme::sync_system_appearance(Some(window), cx);
+                if let Ok(settings) = sofia_config::load() {
+                    apply_appearance(&settings.appearance, cx);
+                }
             }
         })
         .detach();

@@ -22,6 +22,8 @@ pub struct SettingsView {
     output: Picker,
     output_ids: Vec<Option<String>>,
     theme: Picker,
+    font: Picker,
+    radius: Picker,
     voice: Picker,
     api_key: Entity<InputState>,
     api_model: Entity<InputState>,
@@ -121,6 +123,38 @@ impl SettingsView {
             .position(|name| name.as_ref() == settings.appearance.theme)
             .unwrap_or(0);
         let theme = picker(themes, selected, window, cx);
+        let mut fonts: Vec<SharedString> = vec!["System default".into()];
+        let mut installed = cx.text_system().all_font_names();
+        installed.sort_unstable_by_key(|name| name.to_lowercase());
+        installed.dedup();
+        fonts.extend(installed.into_iter().map(SharedString::from));
+        let selected = settings
+            .appearance
+            .font_family
+            .as_ref()
+            .and_then(|family| fonts.iter().position(|name| name.as_ref() == family))
+            .unwrap_or(0);
+        let font = picker(fonts, selected, window, cx);
+        const RADII: [(&str, Option<u8>); 5] = [
+            ("Default", None),
+            ("Square", Some(0)),
+            ("Small", Some(4)),
+            ("Round", Some(10)),
+            ("More round", Some(16)),
+        ];
+        let selected = RADII
+            .iter()
+            .position(|(_, value)| *value == settings.appearance.radius)
+            .unwrap_or(0);
+        let radius = picker(
+            RADII
+                .iter()
+                .map(|(label, _)| SharedString::from(*label))
+                .collect(),
+            selected,
+            window,
+            cx,
+        );
         cx.subscribe_in(&theme, window, |view, _, event, window, cx| {
             if let SelectEvent::Confirm(Some(name)) = event {
                 view.settings.appearance.theme = name.to_string();
@@ -166,6 +200,8 @@ impl SettingsView {
             output,
             output_ids,
             theme,
+            font,
+            radius,
             voice,
             api_key,
             api_model,
@@ -214,6 +250,22 @@ impl SettingsView {
         if let Some(name) = self.theme.read(cx).selected_value() {
             self.settings.appearance.theme = name.to_string();
         }
+        self.settings.appearance.font_family = self
+            .font
+            .read(cx)
+            .selected_value()
+            .filter(|name| name.as_ref() != "System default")
+            .map(|name| name.to_string());
+        self.settings.appearance.radius = self
+            .radius
+            .read(cx)
+            .selected_index(cx)
+            .and_then(|index| {
+                [None, Some(0), Some(4), Some(10), Some(16)]
+                    .get(index.row)
+                    .copied()
+            })
+            .flatten();
         self.status = match sofia_config::save(&self.settings) {
             Ok(()) => {
                 super::apply_theme(&self.settings.appearance.theme, Some(window), cx);
@@ -264,6 +316,8 @@ impl Render for SettingsView {
         let reset_prompt = prompt.clone();
         let output = self.output.clone();
         let theme = self.theme.clone();
+        let font = self.font.clone();
+        let radius = self.radius.clone();
         let voice = self.voice.clone();
         let provider_get = cx.entity().downgrade();
         let provider_set = provider_get.clone();
@@ -322,7 +376,13 @@ impl Render for SettingsView {
                 .group(SettingGroup::new().title("Theme").item(
                     SettingItem::new("Color theme", SettingField::element(move |_: &gpui_kit::component::setting::RenderOptions, _: &mut Window, _: &mut App| {
                         Select::new(&theme).w_full()
-                    })).layout(Axis::Vertical).description("GPUI Kit loads and watches the Sofia themes folder. Reopen settings to select a newly added theme."))));
+                    })).layout(Axis::Vertical).description("GPUI Kit loads and watches the Sofia themes folder. Reopen settings to select a newly added theme."))
+                    .item(SettingItem::new("Font", SettingField::element(move |_: &gpui_kit::component::setting::RenderOptions, _: &mut Window, _: &mut App| {
+                        Select::new(&font).w_full()
+                    })).layout(Axis::Vertical).description("Search installed system fonts."))
+                    .item(SettingItem::new("Corner radius", SettingField::element(move |_: &gpui_kit::component::setting::RenderOptions, _: &mut Window, _: &mut App| {
+                        Select::new(&radius).w_full()
+                    })).layout(Axis::Vertical))));
         div()
             .size_full()
             .flex()

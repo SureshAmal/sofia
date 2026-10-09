@@ -165,11 +165,15 @@ pub struct GeminiSettings {
 #[serde(default)]
 pub struct AppearanceSettings {
     pub theme: String,
+    pub font_family: Option<String>,
+    pub radius: Option<u8>,
 }
 impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
             theme: "system".into(),
+            font_family: None,
+            radius: None,
         }
     }
 }
@@ -207,6 +211,19 @@ impl Settings {
 #[cfg(test)]
 mod mcp_tests {
     use super::*;
+    #[test]
+    fn appearance_roundtrip() {
+        let mut settings = Settings::default();
+        settings.appearance.font_family = Some("Noto Sans".into());
+        settings.appearance.radius = Some(10);
+        let restored: Settings =
+            serde_json::from_value(serde_json::to_value(settings).unwrap()).unwrap();
+        assert_eq!(
+            restored.appearance.font_family.as_deref(),
+            Some("Noto Sans")
+        );
+        assert_eq!(restored.appearance.radius, Some(10));
+    }
     #[test]
     fn mcp_roundtrip_and_duplicate_validation() {
         let mut settings = Settings::default();
