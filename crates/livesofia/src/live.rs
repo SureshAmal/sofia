@@ -267,6 +267,7 @@ async fn handle_session(
     let mut tool_tasks: tokio::task::JoinSet<(String, String, serde_json::Value)> =
         tokio::task::JoinSet::new();
     let mut pending_tools = std::collections::HashMap::<String, tokio::task::AbortHandle>::new();
+    let mut completed_tool_responses = Vec::<FunctionResponse>::new();
     let mut transcript = AssistantTranscript::new();
     let mut busy = false;
     let mut paused = false;
@@ -292,6 +293,10 @@ async fn handle_session(
         None
     };
     let mut playback: Option<AudioPlayback> = None;
+    // Tool turns may cause Gemini to narrate each call/result. Keep those
+    // intermediate announcements in the UI only; speech resumes for the
+    // final response after all tools have returned.
+    let mut tool_audio_suppressed = false;
     let mut speaker_muted = hub.snapshot().speaker_muted;
     let mut selected_output_device_id = hub.snapshot().selected_output_device_id;
     let mut audio_level_counter = 0_u8;
@@ -313,11 +318,19 @@ async fn handle_session(
                             message: format!("{}: {}", name, detail.chars().take(512).collect::<String>()),
                         });
                     }
-                    if let Err(error) = session.send_tool_response(vec![FunctionResponse { id, name, response }]).await {
-                        warn!(%error,"MCP result could not be sent to Gemini");
-                        break;
+                    // Keep all results from one Gemini tool turn together.
+                    // Sending each result immediately can make Gemini start a
+                    // separate spoken answer for every completed call.
+                    completed_tool_responses.push(FunctionResponse { id, name, response });
+                    if pending_tools.is_empty() {
+                        let responses = std::mem::take(&mut completed_tool_responses);
+                        if let Err(error) = session.send_tool_response(responses).await {
+                            warn!(%error,"MCP result could not be sent to Gemini");
+                            break;
+                        }
+                        tool_audio_suppressed = false;
+                        hub.set_state(TurnState::Thinking, Some(session_id));
                     }
-                    if pending_tools.is_empty() { hub.set_state(TurnState::Thinking, Some(session_id)); }
                 }
             }
             _ = audio_health.tick() => {
@@ -498,6 +511,9 @@ async fn handle_session(
                 }
                 match event {
                     GeminiEvent::ModelAudio(bytes) => {
+                        if tool_audio_suppressed {
+                            continue;
+                        }
                         busy = true;
                         hub.set_state(TurnState::Speaking, Some(session_id));
                         let now = tokio::time::Instant::now();
@@ -534,6 +550,10 @@ async fn handle_session(
                     GeminiEvent::InputTranscription(text) => hub.publish(ServerEvent::InputText { text }),
                     GeminiEvent::ToolCall(calls) => {
                         busy = true;
+                        tool_audio_suppressed = true;
+                        if let Some(player) = playback.as_ref() {
+                            player.clear();
+                        }
                         hub.set_state(TurnState::ToolQueued, Some(session_id));
                         for call in calls {
                             hub.publish(ServerEvent::ToolCallRequested { call_id: call.id.clone(), name: call.name.clone() });

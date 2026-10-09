@@ -121,7 +121,20 @@ pub fn execute(store: &Store, name: &str, args: Value) -> Result<(Value, Option<
                 doc = store.update(doc, rev)?;
             }
             let doc = store.set_open(&doc.id, name == "sofia_open_window")?;
-            return Ok((doc.json(), Some(doc.id)));
+            // Opening or closing a presentation window is a UI side effect.
+            // Do not send the whole note/chart/HTML body back to Gemini: that
+            // large result can trigger a separate spoken acknowledgement for
+            // every window in a multi-window request. The UI receives the
+            // complete document through ContentChanged over IPC.
+            return Ok((
+                json!({
+                    "ok": true,
+                    "id": doc.id,
+                    "title": doc.title,
+                    "open": doc.open,
+                }),
+                Some(doc.id),
+            ));
         }
         "sofia_list_windows" => {
             let include_closed = args
