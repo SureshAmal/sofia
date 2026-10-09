@@ -220,6 +220,23 @@ pub async fn run(hub: EventHub, mut commands: mpsc::Receiver<LiveCommand>) {
         let mcp = std::sync::Arc::new(mcp);
         let selected_voice = hub.snapshot().gemini_voice_name;
         let mut session_config = config.session_config(selected_voice.as_deref());
+        if let Ok(path) = sofia_memory::MemoryStore::default_path()
+            && let Ok(mem_store) = sofia_memory::MemoryStore::open(&path)
+            && let Ok(prefs) = mem_store.list_user_preferences()
+            && !prefs.is_empty()
+        {
+            let mut memory_context = String::from("\n\nLearned User Preferences & Rules (from persistent memory):\n");
+            for pref in prefs.iter().take(12) {
+                memory_context.push_str(&format!("- [{}] {}: {} (context: {})\n", pref.category, pref.key, pref.value, pref.source_context));
+            }
+            if let Some(instruction) = session_config.setup.system_instruction.as_mut() {
+                for part in &mut instruction.parts {
+                    if let Some(text) = part.text.as_mut() {
+                        text.push_str(&memory_context);
+                    }
+                }
+            }
+        }
         let declarations = mcp.declarations();
         if !declarations.is_empty() {
             session_config.setup.tools = Some(vec![Tool::FunctionDeclarations(declarations)]);

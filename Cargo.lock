@@ -4390,6 +4390,7 @@ dependencies = [
  "serde_json",
  "sofia-config",
  "sofia-mcp-client",
+ "sofia-memory",
  "sofia-protocol",
  "sofia-trace-store",
  "thiserror 2.0.21",
