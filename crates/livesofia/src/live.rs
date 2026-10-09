@@ -198,13 +198,15 @@ pub async fn run(hub: EventHub, mut commands: mpsc::Receiver<LiveCommand>) {
             }
         };
 
-        if let Ok(settings) = sofia_config::load() {
-            hub.set_output_device(settings.audio.output_device_id);
-            hub.set_gemini_voice(settings.gemini.voice_name);
+        let settings = sofia_config::load().ok();
+        if let Some(settings) = &settings {
+            hub.set_output_device(settings.audio.output_device_id.clone());
+            hub.set_gemini_voice(settings.gemini.voice_name.clone());
         }
         hub.set_state(TurnState::Connecting, None);
-        let mcp_configs = sofia_config::load()
-            .map(|settings| settings.mcp_servers)
+        let mcp_configs = settings
+            .as_ref()
+            .map(|s| s.mcp_servers.clone())
             .unwrap_or_default();
         let (mcp, reports) = sofia_mcp_client::McpBridge::connect(&mcp_configs).await;
         for report in reports {
@@ -222,6 +224,7 @@ pub async fn run(hub: EventHub, mut commands: mpsc::Receiver<LiveCommand>) {
         if !declarations.is_empty() {
             session_config.setup.tools = Some(vec![Tool::FunctionDeclarations(declarations)]);
         }
+        let auto_listen = settings.as_ref().map(|s| s.audio.auto_listen).unwrap_or(true);
         let connected =
             tokio::time::timeout(Duration::from_secs(45), Session::connect(session_config)).await;
         match connected {
@@ -229,7 +232,7 @@ pub async fn run(hub: EventHub, mut commands: mpsc::Receiver<LiveCommand>) {
                 let session_id = Uuid::new_v4();
                 info!(%session_id, "Gemini Live session ready");
                 hub.set_state(TurnState::Ready, Some(session_id));
-                handle_session(session, session_id, &hub, &mut commands, mcp).await;
+                handle_session(session, session_id, &hub, &mut commands, mcp, auto_listen).await;
             }
             Ok(Err(error)) => {
                 warn!(%error, "Gemini Live connection failed");
@@ -263,6 +266,7 @@ async fn handle_session(
     hub: &EventHub,
     commands: &mut mpsc::Receiver<LiveCommand>,
     mcp: std::sync::Arc<sofia_mcp_client::McpBridge>,
+    auto_listen: bool,
 ) {
     let mut tool_tasks: tokio::task::JoinSet<(String, String, sofia_mcp_client::ToolOutput)> =
         tokio::task::JoinSet::new();
@@ -273,9 +277,6 @@ async fn handle_session(
     let mut busy = false;
     let mut paused = false;
     let (audio_sender, mut audio_chunks) = mpsc::channel::<AudioChunk>(8);
-    let auto_listen = sofia_config::load()
-        .map(|settings| settings.audio.auto_listen)
-        .unwrap_or(true);
     let mut microphone = if auto_listen {
         match MicCapture::start(audio_sender.clone()).await {
             Ok(capture) => {

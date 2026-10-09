@@ -113,26 +113,42 @@ fn open_and_capture(
     let frames_per_chunk = (sample_rate * CAPTURE_CHUNK_MS / 1000) as usize;
     let _ = ready.send(Ok(()));
 
+    let mut samples = Vec::with_capacity(frames_per_chunk);
+    let mut pcm = Vec::with_capacity(frames_per_chunk * 2);
+
     while !stop.load(Ordering::Acquire) && !sender.is_closed() {
-        let mut samples = Vec::with_capacity(frames_per_chunk);
+        samples.clear();
+        pcm.clear();
         let mut energy = 0.0_f32;
+        let mut stream_ended = false;
+
         for _ in 0..frames_per_chunk {
             let mut sum = 0.0_f32;
             for _ in 0..channels {
                 let Some(value) = microphone.next() else {
-                    return Err("microphone stream ended".into());
+                    stream_ended = true;
+                    break;
                 };
                 sum += value;
+            }
+            if stream_ended {
+                break;
             }
             let sample = (sum / channels as f32).clamp(-1.0, 1.0);
             energy += sample * sample;
             samples.push(sample);
+            let val = (sample * i16::MAX as f32).round() as i16;
+            pcm.extend_from_slice(&val.to_le_bytes());
         }
+
+        if stream_ended {
+            return Err("microphone stream ended".into());
+        }
+
         let rms = (energy / samples.len() as f32).sqrt();
-        let pcm = encode_pcm(&samples);
         let _ = sender.try_send(AudioChunk {
             capture_id,
-            pcm,
+            pcm: pcm.clone(),
             sample_rate,
             rms,
         });
@@ -141,6 +157,7 @@ fn open_and_capture(
     Ok(())
 }
 
+#[cfg(test)]
 fn encode_pcm(samples: &[f32]) -> Vec<u8> {
     let mut pcm = Vec::with_capacity(samples.len() * 2);
     for &sample in samples {
