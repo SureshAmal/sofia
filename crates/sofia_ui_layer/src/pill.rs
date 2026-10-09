@@ -84,7 +84,7 @@ impl PillView {
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
-        let mut changed = self.documents.tick();
+        let mut changed = self.documents.tick(cx);
         while let Ok(update) = self.receiver.try_recv() {
             changed = true;
             match update {
