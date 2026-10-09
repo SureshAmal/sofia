@@ -17,7 +17,7 @@ use crate::ipc_client::{IpcClient, UiUpdate};
 const BASE_EDGE_GAP_REM: f32 = 0.75;
 
 pub struct PillView {
-    documents: crate::content_windows::WindowManager,
+    pub(crate) documents: crate::content_windows::WindowManager,
     ipc: IpcClient,
     receiver: Receiver<UiUpdate>,
     snapshot: StateSnapshot,
@@ -716,9 +716,14 @@ impl Render for PillView {
                 },
             );
 
-            let documents =
-                self.documents
-                    .render((input_x, input_y), input_size, self.viewport, rem, cx);
+            let documents = self.documents.render(
+                (input_x, input_y),
+                input_size,
+                self.viewport,
+                rem,
+                cx.entity(),
+                cx,
+            );
             let view = cx.entity().downgrade();
             let view_up = cx.entity().downgrade();
             div()

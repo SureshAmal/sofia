@@ -7,4 +7,5 @@ pub mod theme;
 
 mod speech_flow;
 
+pub mod window;
 mod content_windows;

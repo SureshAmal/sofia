@@ -6,6 +6,9 @@ edition.workspace = true
 [dependencies]
 futures-util.workspace = true
 gpui-kit.workspace = true
+markdown = "1.0.0"
+mermaid-rs-renderer = { version = "0.3.1", default-features = false }
+open = "5.4.4"
 pulldown-cmark.workspace = true
 serde_json.workspace = true
 sofia-config.workspace = true
