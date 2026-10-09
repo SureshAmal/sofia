@@ -6,11 +6,12 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     chart::{AreaChart, BarChart, LineChart, PieChart, RadarChart},
     checkbox::Checkbox,
-    input::{Input, InputState},
+    input::{Input, InputState, InputEvent, Textarea, TextareaState},
     text::{TextView, TextViewState},
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
+use pulldown_cmark::{Event, Options, Parser};
 use sofia_content::{ChartPoint, ChartType, Content, Document, Store, TodoItem};
 use std::{
     collections::HashSet,
@@ -140,7 +141,7 @@ impl WindowManager {
                             .find(|panel| panel.view.read(cx).doc.id == doc.id)
                         {
                             panel.closing = None;
-                            if panel.view.read(cx).doc.revision != doc.revision {
+                            if panel.view.read(cx).doc.revision < doc.revision {
                                 panel
                                     .view
                                     .update(cx, |view, cx| view.apply(doc, window, cx));
@@ -437,6 +438,12 @@ pub(crate) struct DocumentView {
     pub(crate) remote: Option<Document>,
     pub(crate) commands: mpsc::Sender<Command>,
     pub(crate) text: Entity<TextViewState>,
+    note_blocks: Vec<Entity<TextViewState>>,
+    note_ranges: Vec<std::ops::Range<usize>>,
+    note_input: Entity<TextareaState>,
+    active_note: Option<usize>,
+    note_draft: String,
+    _note_subscription: Subscription,
     pub(crate) new_item: Entity<InputState>,
     pub(crate) due: Entity<InputState>,
     pub(crate) editing_item: Option<String>,
@@ -455,6 +462,28 @@ fn source(content: &Content) -> String {
     }
 }
 
+fn markdown_blocks(markdown: &str) -> Vec<std::ops::Range<usize>> {
+    let mut blocks = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (event, range) in Parser::new_ext(markdown, Options::all()).into_offset_iter() {
+        match event {
+            Event::Start(_) => {
+                if depth == 0 { start = range.start; }
+                depth += 1;
+            }
+            Event::End(_) => {
+                depth -= 1;
+                if depth == 0 { blocks.push(start..range.end); }
+            }
+            Event::Rule if depth == 0 => blocks.push(range),
+            _ => {}
+        }
+    }
+    if blocks.is_empty() { blocks.push(0..markdown.len()); }
+    blocks
+}
+
 impl DocumentView {
     fn new(
         doc: Document,
@@ -471,6 +500,16 @@ impl DocumentView {
             }
         });
 
+        let note_draft = match &doc.content { Content::Note { markdown } => markdown.clone(), _ => String::new() };
+        let note_ranges = markdown_blocks(&note_draft);
+        let note_blocks = note_ranges.iter().map(|range| {
+            cx.new(|cx| TextViewState::markdown(&note_draft[range.clone()], cx))
+        }).collect();
+        let note_input = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 20));
+        let note_subscription = cx.subscribe(&note_input, |view, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Blur) { view.finish_note_edit(cx); }
+        });
+
         let new_item = cx.new(|cx| InputState::new(window, cx).placeholder("New item"));
         let due =
             cx.new(|cx| InputState::new(window, cx).placeholder("Due time (optional ISO8601)"));
@@ -479,6 +518,12 @@ impl DocumentView {
             remote: None,
             commands,
             text,
+            note_blocks,
+            note_ranges,
+            note_input,
+            active_note: None,
+            note_draft,
+            _note_subscription: note_subscription,
             new_item,
             due,
             editing_item: None,
@@ -491,6 +536,12 @@ impl DocumentView {
     }
 
     fn apply(&mut self, doc: Document, window: &mut Window, cx: &mut Context<Self>) {
+        if self.active_note.is_some() {
+            self.remote = Some(doc);
+            self.status = "Changed elsewhere".into();
+            cx.notify();
+            return;
+        }
         let content = source(&doc.content);
         self.text
             .update(cx, |state, cx| state.set_text(&content, cx));
@@ -506,8 +557,48 @@ impl DocumentView {
             self.pending_item = None;
         }
         self.doc = doc;
+        if let Content::Note { markdown } = &self.doc.content {
+            self.note_draft = markdown.clone();
+            self.rebuild_note_blocks(cx);
+        }
         self.remote = None;
         self.status = "Saved".into();
+        cx.notify();
+    }
+
+    fn rebuild_note_blocks(&mut self, cx: &mut Context<Self>) {
+        self.note_ranges = markdown_blocks(&self.note_draft);
+        self.note_blocks = self.note_ranges.iter().map(|range| {
+            cx.new(|cx| TextViewState::markdown(&self.note_draft[range.clone()], cx))
+        }).collect();
+    }
+
+    fn begin_note_edit(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_note_edit(cx);
+        let Some(range) = self.note_ranges.get(index) else { return };
+        self.note_input.update(cx, |input, cx| {
+            input.set_value(self.note_draft[range.clone()].to_string(), window, cx);
+            input.focus(window, cx);
+        });
+        self.active_note = Some(index);
+        cx.notify();
+    }
+
+    fn finish_note_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(index) = self.active_note.take() else { return };
+        let Some(range) = self.note_ranges.get(index) else { return };
+        let replacement = self.note_input.read(cx).value().to_string();
+        if self.note_draft[range.clone()] != replacement {
+            self.note_draft.replace_range(range.clone(), &replacement);
+            let mut doc = self.doc.clone();
+            doc.content = Content::Note { markdown: self.note_draft.clone() };
+            if self.commands.send(Command::Save(doc.clone())).is_ok() {
+                doc.revision += 1;
+                self.doc = doc;
+            }
+            self.status = "Saving…".into();
+        }
+        self.rebuild_note_blocks(cx);
         cx.notify();
     }
 
@@ -725,7 +816,28 @@ impl Render for DocumentView {
         title_bar = title_bar.child(actions);
 
         let body = match &self.doc.content {
-            Content::Note { .. } | Content::Html { .. } => {
+            Content::Note { .. } => {
+                div().id("note-blocks").flex().flex_col().gap_2().flex_1().overflow_y_scroll().children(
+                    self.note_blocks.iter().enumerate().map(|(index, block)| {
+                        if self.active_note == Some(index) {
+                            Textarea::new(&self.note_input)
+                                .appearance(false)
+                                .bordered(false)
+                                .w_full()
+                                .into_any_element()
+                        } else {
+                            div()
+                                .id(SharedString::from(format!("note-block-{index}")))
+                                .on_click(cx.listener(move |view, _, window, cx| {
+                                    view.begin_note_edit(index, window, cx)
+                                }))
+                                .child(TextView::new(block).selectable(false))
+                                .into_any_element()
+                        }
+                    }),
+                ).into_any_element()
+            }
+            Content::Html { .. } => {
                 TextView::new(&self.text)
                     .selectable(true)
                     .scrollable(true)
@@ -842,22 +954,32 @@ impl Render for DocumentView {
                     .y_axis(true)
                     .appear_key(self.doc.revision)
                     .into_any_element(),
-                ChartType::Bar => BarChart::new(points.clone())
-                    .band(|point: &ChartPoint| point.label.clone())
-                    .value(|point: &ChartPoint| point.value)
-                    .appear_key(self.doc.revision)
-                    .into_any_element(),
+                ChartType::Bar => {
+                    let labels = points.iter().map(|point| point.label.clone()).collect::<Vec<_>>();
+                    let colors = [cx.theme().red, cx.theme().yellow, cx.theme().green, cx.theme().cyan, cx.theme().blue, cx.theme().magenta];
+                    BarChart::new(points.clone())
+                        .band(|point: &ChartPoint| point.label.clone())
+                        .value(|point: &ChartPoint| point.value)
+                        .fill(move |point: &ChartPoint, _, _, _| colors[labels.iter().position(|label| label == &point.label).unwrap_or(0) % colors.len()])
+                        .appear_key(self.doc.revision)
+                        .into_any_element()
+                }
                 ChartType::Area => AreaChart::new(points.clone())
                     .x(|point: &ChartPoint| point.label.clone())
                     .y(|point: &ChartPoint| point.value)
                     .stroke(cx.theme().blue)
                     .appear_key(self.doc.revision)
                     .into_any_element(),
-                ChartType::Pie => PieChart::new(points.clone())
-                    .value(|point: &ChartPoint| point.value as f32)
-                    .label(|point: &ChartPoint| point.label.clone().into())
-                    .appear_key(self.doc.revision)
-                    .into_any_element(),
+                ChartType::Pie => {
+                    let labels = points.iter().map(|point| point.label.clone()).collect::<Vec<_>>();
+                    let colors = [cx.theme().red, cx.theme().yellow, cx.theme().green, cx.theme().cyan, cx.theme().blue, cx.theme().magenta];
+                    PieChart::new(points.clone())
+                        .value(|point: &ChartPoint| point.value as f32)
+                        .label(|point: &ChartPoint| point.label.clone().into())
+                        .color(move |point: &ChartPoint| colors[labels.iter().position(|label| label == &point.label).unwrap_or(0) % colors.len()])
+                        .appear_key(self.doc.revision)
+                        .into_any_element()
+                }
                 ChartType::Radar => RadarChart::new(points.clone())
                     .label(|point: &ChartPoint| point.label.clone())
                     .value(|point: &ChartPoint| point.value)
@@ -937,8 +1059,16 @@ impl Render for DocumentView {
 
 #[cfg(test)]
 mod tests {
-    use super::{panel_bounds, Placement};
+    use super::{markdown_blocks, panel_bounds, Placement};
     use sofia_content::{Content, Document};
+
+    #[test]
+    fn markdown_editor_keeps_top_level_blocks_intact() {
+        let source = "# Title\n\nA **bold** paragraph.\n\n- one\n- two\n\n```rust\nfn main() {}\n```";
+        let blocks = markdown_blocks(source);
+        assert_eq!(blocks.iter().map(|range| &source[range.clone()]).collect::<Vec<_>>(),
+            ["# Title\n", "A **bold** paragraph.\n", "- one\n- two\n\n", "```rust\nfn main() {}\n```"]);
+    }
 
     #[test]
     fn test_placement_parsing() {
