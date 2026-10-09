@@ -39,6 +39,7 @@ pub struct PillView {
     snap_x: Option<f32>,
     velocity_x: f32,
     dragged: bool,
+    last_input_regions: Option<Vec<Bounds<Pixels>>>,
 }
 
 impl PillView {
@@ -78,6 +79,7 @@ impl PillView {
             snap_x: None,
             velocity_x: 0.0,
             dragged: false,
+            last_input_regions: None,
         }
     }
 
@@ -126,8 +128,11 @@ impl PillView {
 
         // Decay peak targets smoothly
         for band in &mut self.bands {
-            if *band > 0.001 {
+            if *band > 0.005 {
                 *band *= 0.88;
+                changed = true;
+            } else if *band > 0.0 {
+                *band = 0.0;
                 changed = true;
             }
         }
@@ -135,12 +140,15 @@ impl PillView {
         // Interpolate smooth_bands toward target bands for fluid visualization
         for (smooth, &target) in self.smooth_bands.iter_mut().zip(self.bands.iter()) {
             let diff = target - *smooth;
-            if diff.abs() > 0.002 {
+            if diff.abs() > 0.005 {
                 *smooth += if diff > 0.0 {
                     diff * 0.45 // Quick attack
                 } else {
                     diff * 0.22 // Smooth release
                 };
+                changed = true;
+            } else if *smooth != target {
+                *smooth = target;
                 changed = true;
             }
         }
@@ -664,7 +672,10 @@ impl Render for PillView {
                 (x, y, self.pill_size)
             };
             if !ready {
-                window.set_input_region(Some(&[]));
+                if self.last_input_regions.as_ref().is_none_or(|r| !r.is_empty()) {
+                    self.last_input_regions = Some(Vec::new());
+                    window.set_input_region(Some(&[]));
+                }
             } else if self.drag_offset.is_none() && !self.documents.is_dragging(cx) {
                 let mut regions =
                     self.documents
@@ -673,7 +684,11 @@ impl Render for PillView {
                     point(px(input_x), px(input_y)),
                     size(px(input_size.0), px(input_size.1)),
                 ));
-                window.set_input_region(Some(&regions));
+                let changed = self.last_input_regions.as_ref() != Some(&regions);
+                if changed {
+                    self.last_input_regions = Some(regions.clone());
+                    window.set_input_region(Some(&regions));
+                }
             }
 
             let compact_size = self.pill_size;

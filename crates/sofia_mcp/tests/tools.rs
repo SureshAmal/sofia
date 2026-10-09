@@ -14,7 +14,7 @@ async fn documents_roundtrip_through_real_mcp_client() {
     });
     let client = ().serve(client_io).await.unwrap();
     let server = server.await.unwrap();
-    assert_eq!(client.list_all_tools().await.unwrap().len(), 8);
+    assert_eq!(client.list_all_tools().await.unwrap().len(), 9);
     let created=client.call_tool(CallToolRequestParams::new("sofia_create_document").with_arguments(json!({"title":"Test note","content":{"kind":"note","markdown":"Hello **world**"},"open":false}).as_object().unwrap().clone())).await.unwrap();
     let result = created;
     let encoded = serde_json::to_value(result).unwrap();
@@ -199,6 +199,27 @@ async fn documents_roundtrip_through_real_mcp_client() {
     for item in docs_val.as_array().unwrap() {
         assert!(item["open"].is_boolean());
     }
+
+    // 7. Test sofia_delete_documents
+    let del_res = client
+        .call_tool(
+            CallToolRequestParams::new("sofia_delete_documents").with_arguments(
+                json!({"ids": [id]})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let del_val: serde_json::Value = serde_json::from_str(
+        serde_json::to_value(del_res).unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(del_val["deleted_count"], 1);
+    assert_eq!(del_val["deleted"][0], id);
 
     client.cancel().await.unwrap();
     server.cancel().await.unwrap();

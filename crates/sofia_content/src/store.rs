@@ -162,6 +162,39 @@ impl Store {
         drop(conn);
         self.get(id)
     }
+    pub fn delete(&self, id: &str) -> Result<bool, String> {
+        let mut conn = self.connection.lock().map_err(error)?;
+        let tx = conn.transaction().map_err(error)?;
+        let rows = tx
+            .execute("DELETE FROM documents WHERE id=?1", [id])
+            .map_err(error)?;
+        if rows > 0 {
+            tx.execute("DELETE FROM documents_fts WHERE id=?1", [id])
+                .map_err(error)?;
+        }
+        tx.commit().map_err(error)?;
+        Ok(rows > 0)
+    }
+    pub fn delete_many(&self, ids: &[String]) -> Result<Vec<String>, String> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut conn = self.connection.lock().map_err(error)?;
+        let tx = conn.transaction().map_err(error)?;
+        let mut deleted = Vec::new();
+        for id in ids {
+            let rows = tx
+                .execute("DELETE FROM documents WHERE id=?1", [id])
+                .map_err(error)?;
+            if rows > 0 {
+                tx.execute("DELETE FROM documents_fts WHERE id=?1", [id])
+                    .map_err(error)?;
+                deleted.push(id.clone());
+            }
+        }
+        tx.commit().map_err(error)?;
+        Ok(deleted)
+    }
     pub fn open_documents(&self) -> Result<Vec<Document>, String> {
         let conn = self.connection.lock().map_err(error)?;
         let mut stmt=conn.prepare("SELECT id,title,tags,content,revision,updated_at,is_open,width_rem,height_rem FROM documents WHERE is_open=1 ORDER BY updated_at,id").map_err(error)?;

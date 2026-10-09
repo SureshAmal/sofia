@@ -147,6 +147,29 @@ pub fn execute(store: &Store, name: &str, args: Value) -> Result<(Value, Option<
                 "closed_count": closed_count,
             })
         }
+        "sofia_delete_documents" => {
+            let ids: Vec<String> = if let Some(ids_array) = args.get("ids").and_then(Value::as_array) {
+                ids_array
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            } else if let Some(id_str) = args.get("id").and_then(Value::as_str) {
+                vec![id_str.to_string()]
+            } else {
+                return Err("Specify 'ids' (array of document IDs) or 'id' (single document ID) to delete".into());
+            };
+            if ids.is_empty() {
+                return Err("No document IDs provided for deletion".into());
+            }
+            let deleted = store.delete_many(&ids)?;
+            let deleted_count = deleted.len();
+            json!({
+                "deleted": deleted,
+                "deleted_count": deleted_count,
+                "requested_count": ids.len(),
+            })
+        }
         _ => return Err("Unknown Sofia tool".into()),
     };
     Ok((value, None))
@@ -207,12 +230,24 @@ pub fn declarations() -> Vec<Tool> {
     let list_windows = json!({
         "include_closed": {"type": "boolean", "description": "When true, includes closed windows with open=false in addition to active windows"}
     });
+    let delete_documents = json!({
+        "ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "List of document IDs to permanently delete from local storage"
+        },
+        "id": {
+            "type": "string",
+            "description": "Single document ID to delete (optional if 'ids' is provided)"
+        }
+    });
     [
         ("sofia_window_protocol","Get supported content kinds, tags, chart types (line, bar, area, pie, radar), window placements, inline editing rules, and open/closed window tracking",object(json!({}),vec![])),
         ("sofia_create_document","Persist and optionally open notes, todos, reminders, charts (line, bar, area, pie, radar), or HTML. Opens by default.",object(create,vec!["title","content"])),
         ("sofia_list_documents","Search saved content by indexed text, kind or tag. Returns document summaries with open/closed status.",object(json!({"query":{"type":"string"},"kind":{"type":"string"},"tag":{"type":"string"}}),vec![])),
         ("sofia_get_document","Read saved content and revision by ID or exact unique title",object(selector.clone(),vec![])),
         ("sofia_update_document","Edit saved content and update open window live. Supply latest expected_revision to avoid overwriting user edits.",object(update,vec!["id","expected_revision"])),
+        ("sofia_delete_documents","Permanently delete one or more notes/documents by their IDs from storage.",object(delete_documents,vec![])),
         ("sofia_open_window","Open saved content by ID or unique title at a specific position (pill, center, left, right, bottom, top_left, top_right, bottom_left, bottom_right)",object(open,vec![])),
         ("sofia_close_window","Close a presentation window into the pill without deleting its saved content",object(selector,vec![])),
         ("sofia_list_windows","List open (and optionally closed) windows with IDs, titles, open status, kinds, and tags",object(list_windows,vec![])),
