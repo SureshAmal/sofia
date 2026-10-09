@@ -116,7 +116,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             sofia_mcp_client::tool_name("probe", "sofia_create_document")
         )
     } else {
-        "Call mcp_probe__echo with text exactly sofia-mcp-ok, then say the tool result in one short sentence. You must call the tool.".into()
+        format!(
+            "Call {} with text exactly sofia-mcp-ok, then say the tool result in one short sentence. You must call the tool.",
+            sofia_mcp_client::tool_name("probe", "echo")
+        )
     };
     session
         .send_client_content(ClientContent {

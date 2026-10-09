@@ -94,6 +94,7 @@ struct Binding {
 pub struct McpBridge {
     declarations: Vec<FunctionDeclaration>,
     bindings: HashMap<String, Binding>,
+    aliases: HashMap<String, String>,
 }
 impl McpBridge {
     pub async fn connect(configs: &[McpServerConfig]) -> (Self, Vec<ServerReport>) {
@@ -151,12 +152,15 @@ impl McpBridge {
                             behavior: None,
                         });
                         bridge.bindings.insert(
-                            name,
+                            name.clone(),
                             Binding {
                                 server: server.clone(),
                                 original: tool.name.to_string(),
                             },
                         );
+                        bridge
+                            .aliases
+                            .insert(legacy_tool_name(&config.id, &tool.name), name);
                         report.tools += 1;
                     }
                 }
@@ -169,7 +173,12 @@ impl McpBridge {
         self.declarations.clone()
     }
     pub async fn call(&self, name: &str, args: Value) -> Value {
-        let result = match self.bindings.get(name) {
+        let binding = self.bindings.get(name).or_else(|| {
+            self.aliases
+                .get(name)
+                .and_then(|canonical| self.bindings.get(canonical))
+        });
+        let result = match binding {
             Some(binding) => binding.server.call(binding.original.clone(), args).await,
             None => Err("Unknown or disabled MCP tool".into()),
         };
@@ -178,6 +187,30 @@ impl McpBridge {
 }
 
 pub fn tool_name(server: &str, tool: &str) -> String {
+    let safe: String = tool
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || byte == b'_' {
+                byte as char
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let name = format!("mcp_{server}_{safe}");
+    if name.len() <= 64 && safe == tool {
+        name
+    } else {
+        let hash = tool.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        });
+        let suffix = format!("_h{hash:016x}");
+        let available = 64 - suffix.len();
+        name[..name.len().min(available)].to_string() + &suffix
+    }
+}
+
+fn legacy_tool_name(server: &str, tool: &str) -> String {
     let encoded: String = tool
         .bytes()
         .map(|byte| {

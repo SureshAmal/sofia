@@ -42,9 +42,23 @@ async fn discovers_pages_routes_servers_and_filters_tools() {
 }
 #[test]
 fn tool_names_are_stable_and_distinct() {
+    assert_eq!(
+        tool_name("sofia", "sofia_list_documents"),
+        "mcp_sofia_sofia_list_documents"
+    );
     assert_ne!(tool_name("one", "a-b"), tool_name("one", "a_2db"));
     assert_ne!(tool_name("one", "echo"), tool_name("two", "echo"));
     assert!(tool_name("server", &"x".repeat(100)).len() <= 64);
+}
+#[tokio::test]
+async fn old_declared_names_remain_routable() {
+    let (bridge, _) = McpBridge::connect(&[fixture("sofia")]).await;
+    assert_eq!(
+        bridge
+            .call("mcp_sofia__echo", json!({"text":"legacy"}))
+            .await["content"][0]["text"],
+        "legacy"
+    );
 }
 #[tokio::test]
 async fn failure_is_isolated() {

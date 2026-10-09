@@ -672,7 +672,11 @@ impl Render for PillView {
                 (x, y, self.pill_size)
             };
             if !ready {
-                if self.last_input_regions.as_ref().is_none_or(|r| !r.is_empty()) {
+                if self
+                    .last_input_regions
+                    .as_ref()
+                    .is_none_or(|r| !r.is_empty())
+                {
                     self.last_input_regions = Some(Vec::new());
                     window.set_input_region(Some(&[]));
                 }
@@ -748,11 +752,14 @@ impl Render for PillView {
 }
 
 fn display_tool_name(name: &str) -> String {
-    let Some(name) = name
-        .strip_prefix("mcp_")
-        .and_then(|name| name.split_once("__").map(|(_, tool)| tool))
-    else {
+    let Some(namespaced) = name.strip_prefix("mcp_") else {
         return name.into();
+    };
+    let Some((_, name)) = namespaced.split_once("__") else {
+        return namespaced
+            .split_once('_')
+            .map(|(_, tool)| tool.to_string())
+            .unwrap_or_else(|| name.into());
     };
     let mut bytes = Vec::new();
     let mut index = 0;
@@ -779,6 +786,10 @@ mod motion_tests {
     #[test]
     fn tool_labels_hide_namespace_and_preserve_native_names() {
         assert_eq!(display_tool_name("mcp_search__web_5fsearch"), "web_search");
+        assert_eq!(
+            display_tool_name("mcp_sofia_sofia_list_documents"),
+            "sofia_list_documents"
+        );
         assert_eq!(display_tool_name("native_abc"), "native_abc");
         assert_eq!(display_tool_name("mcp_server__tool_€"), "tool_€");
     }
