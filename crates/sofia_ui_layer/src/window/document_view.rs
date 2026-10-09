@@ -21,10 +21,12 @@ pub(crate) enum Command {
     Refresh,
 }
 
+type RenderedDiagram = Option<(Arc<[u8]>, f32, f32)>;
+
 #[derive(Clone)]
 pub(crate) struct MermaidBlock {
     pub(crate) code: String,
-    pub(crate) rendered: Arc<std::sync::Mutex<Option<(Arc<[u8]>, f32, f32)>>>,
+    pub(crate) rendered: Arc<std::sync::Mutex<RenderedDiagram>>,
 }
 
 fn hsla_to_hex(hsla: gpui::Hsla) -> String {
@@ -648,15 +650,17 @@ impl DocumentView {
         svg_str = svg_str.replace("fill=\"#ffffff\"", "fill=\"none\"");
         svg_str = svg_str.replace("fill=\"white\"", "fill=\"none\"");
 
-        let mut opt = usvg::Options::default();
-        opt.fontdb = fontdb.clone();
+        let opt = usvg::Options {
+            fontdb: fontdb.clone(),
+            ..Default::default()
+        };
         let rtree =
             usvg::Tree::from_str(&svg_str, &opt).map_err(|e| format!("SVG parse error: {e}"))?;
 
         let size = rtree.size();
         let width = size.width();
         let height = size.height();
-        let scale = 8.0f32;
+        let scale = 2.0f32;
         let px_w = (width * scale).ceil().max(1.0) as u32;
         let px_h = (height * scale).ceil().max(1.0) as u32;
         let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);

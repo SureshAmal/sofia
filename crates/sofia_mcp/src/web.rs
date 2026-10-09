@@ -1,4 +1,3 @@
-use std::process::Command;
 
 pub fn open(query: &str) -> Result<String, String> {
     let query = query.trim();
@@ -13,13 +12,7 @@ pub fn open(query: &str) -> Result<String, String> {
     } else {
         format!("https://duckduckgo.com/?q={}", urlencoding(query))
     };
-    let status = Command::new("xdg-open")
-        .arg(&url)
-        .status()
-        .map_err(|e| format!("Could not open the browser: {e}"))?;
-    if !status.success() {
-        return Err("The system browser could not open the URL".into());
-    }
+    open::that(&url).map_err(|e| format!("The system browser could not open the URL: {e}"))?;
     Ok(url)
 }
 fn urlencoding(value: &str) -> String {

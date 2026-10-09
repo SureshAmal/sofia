@@ -8,6 +8,7 @@ pub struct Application {
     pub executable: Option<String>,
 }
 
+#[cfg(target_os = "linux")]
 fn directories() -> Vec<PathBuf> {
     let mut dirs = vec![
         PathBuf::from("/usr/share/applications"),
@@ -19,11 +20,30 @@ fn directories() -> Vec<PathBuf> {
     dirs
 }
 
+#[cfg(target_os = "windows")]
+fn directories() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        dirs.push(PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs"));
+    }
+    if let Some(progdata) = std::env::var_os("ProgramData") {
+        dirs.push(PathBuf::from(progdata).join(r"Microsoft\Windows\Start Menu\Programs"));
+    }
+    dirs
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn directories() -> Vec<PathBuf> {
+    Vec::new()
+}
+
 pub fn list(query: Option<&str>) -> Result<Vec<Application>, String> {
     let query = query
         .map(|q| q.trim().to_lowercase())
         .filter(|q| !q.is_empty());
     let mut apps = Vec::new();
+
+    #[cfg(target_os = "linux")]
     for dir in directories() {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
@@ -47,14 +67,14 @@ pub fn list(query: Option<&str>) -> Result<Vec<Application>, String> {
             let name = field(&text, "Name");
             let exec = field(&text, "Exec");
             let Some(name) = name else { continue };
-            let id = path.file_name().unwrap().to_string_lossy().into_owned();
-            let matches = query
+            let id = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let score = query
                 .as_ref()
                 .map(|q| fuzzy_score(q, &name, &id))
                 .unwrap_or(Some(0));
-            if matches.is_some() {
+            if let Some(score) = score {
                 apps.push((
-                    matches.unwrap(),
+                    score,
                     Application {
                         name,
                         desktop_id: id,
@@ -64,6 +84,39 @@ pub fn list(query: Option<&str>) -> Result<Vec<Application>, String> {
             }
         }
     }
+
+    #[cfg(target_os = "windows")]
+    for dir in directories() {
+        let mut stack = vec![dir];
+        while let Some(current) = stack.pop() {
+            let Ok(entries) = fs::read_dir(&current) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("lnk")).unwrap_or(false) {
+                    let stem = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+                    let score = query
+                        .as_ref()
+                        .map(|q| fuzzy_score(q, &stem, &stem))
+                        .unwrap_or(Some(0));
+                    if let Some(score) = score {
+                        apps.push((
+                            score,
+                            Application {
+                                name: stem.clone(),
+                                desktop_id: path.to_string_lossy().into_owned(),
+                                executable: Some(path.to_string_lossy().into_owned()),
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     apps.sort_by(|a, b| {
         a.0.cmp(&b.0)
             .then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()))
@@ -77,19 +130,34 @@ pub fn launch(query: &str) -> Result<Application, String> {
         .drain(..)
         .next()
         .ok_or_else(|| format!("No installed application matched '{query}'"))?;
-    let desktop_id = app.desktop_id.trim_end_matches(".desktop");
-    let result = Command::new("gtk-launch")
-        .arg(desktop_id)
-        .status()
-        .or_else(|_| {
-            Command::new("gio")
-                .args(["launch", &app.desktop_id])
-                .status()
-        })
-        .map_err(|e| format!("Could not launch '{}': {e}", app.name))?;
-    if !result.success() {
-        return Err(format!("Application '{}' refused to start", app.name));
+
+    #[cfg(target_os = "linux")]
+    {
+        let desktop_id = app.desktop_id.trim_end_matches(".desktop");
+        let result = Command::new("gtk-launch")
+            .arg(desktop_id)
+            .status()
+            .or_else(|_| {
+                Command::new("gio")
+                    .args(["launch", &app.desktop_id])
+                    .status()
+            })
+            .map_err(|e| format!("Could not launch '{}': {e}", app.name))?;
+        if !result.success() {
+            return Err(format!("Application '{}' refused to start", app.name));
+        }
     }
+
+    #[cfg(target_os = "windows")]
+    {
+        open::that(&app.desktop_id).map_err(|e| format!("Could not launch '{}': {e}", app.name))?;
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        return Err("Application launching is not supported on this operating system".into());
+    }
+
     Ok(app)
 }
 

@@ -61,5 +61,26 @@ pub fn read() -> Result<ClipboardData, String> {
             Ok(_) | Err(_) => continue,
         }
     }
-    Err("Unable to read the clipboard: wl-paste or xclip is required".into())
+    #[cfg(target_os = "windows")]
+    {
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Get-Clipboard"])
+            .output();
+        if let Ok(output) = output
+            && output.status.success()
+        {
+            let text = String::from_utf8_lossy(&output.stdout).trim_end().to_string();
+            if !text.is_empty() {
+                return Ok(ClipboardData::Text(text));
+            }
+        }
+    }
+
+    if cfg!(target_os = "linux") {
+        Err("Unable to read the clipboard: wl-paste or xclip is required".into())
+    } else if cfg!(target_os = "windows") {
+        Err("Unable to read clipboard or clipboard is empty".into())
+    } else {
+        Err("Clipboard is not supported on this operating system".into())
+    }
 }
