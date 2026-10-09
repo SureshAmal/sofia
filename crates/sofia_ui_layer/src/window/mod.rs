@@ -35,18 +35,77 @@ mod tests {
 
     #[test]
     fn test_mermaid_diagram_renders_to_svg() {
+        use merman::svg::{HostTheme, HostThemePreset, Presentation, PresentationProfile, SvgPipeline};
+        use merman::{OperationControl, RenderOutput, RenderRequest, Renderer, SvgRequest};
+
         let diagram = "graph TD;\n    A-->B;\n    A-->C;\n    B-->D;\n    C-->D;";
-        let rendered = mermaid_rs_renderer::render(diagram);
-        assert!(rendered.is_ok(), "Mermaid rendering should succeed");
-        let svg = rendered.unwrap();
-        assert!(
-            svg.contains("<svg"),
-            "Rendered output should contain <svg tag"
-        );
-        assert!(
-            svg.contains("</svg>"),
-            "Rendered output should contain </svg> tag"
-        );
+        let presentation = Presentation::new()
+            .with_profile(PresentationProfile::MermanModern)
+            .with_theme(HostTheme::from_preset(HostThemePreset::OneDark));
+        let resolved = presentation.resolve();
+        let renderer = Renderer::new().with_engine(resolved.materialize_engine(merman::Engine::new()));
+
+        let request = SvgRequest {
+            pipeline: Some(SvgPipeline::resvg_safe()),
+            presentation: resolved.render_policy(),
+            ..Default::default()
+        };
+
+        let output = renderer.render(RenderRequest::svg(diagram, OperationControl::new(), request))
+            .expect("Mermaid rendering should succeed");
+        let svg = match output {
+            RenderOutput::Svg(Some(out)) => out.svg().to_string(),
+            _ => panic!("Expected SVG output"),
+        };
+        assert!(svg.contains("<svg"), "Rendered output should contain <svg tag");
+
+        let mut opt = usvg::Options::default();
+        let mut fontdb = usvg::fontdb::Database::new();
+        fontdb.load_system_fonts();
+        opt.fontdb = std::sync::Arc::new(fontdb);
+        let rtree = usvg::Tree::from_str(&svg, &opt).unwrap();
+        let pixmap_size = rtree.size().to_int_size();
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(pixmap_size.width(), pixmap_size.height()).unwrap();
+        resvg::render(&rtree, resvg::tiny_skia::Transform::default(), &mut pixmap.as_mut());
+        let png = pixmap.encode_png().unwrap();
+        assert!(!png.is_empty());
+    }
+
+    #[test]
+    fn test_merman_render() {
+        use merman::svg::{HostTheme, HostThemePreset, Presentation, PresentationProfile, SvgPipeline};
+        use merman::{OperationControl, RenderOutput, RenderRequest, Renderer, SvgRequest};
+
+        let diagram = r#"
+flowchart TD
+    Client[Instagram Mobile Client] --> HTTPS[HTTPS]
+    HTTPS --> LB[Load Balancer]
+    subgraph Core[Core Services]
+        API[API Gateway / Web]
+    end
+    subgraph Storage[Static Assets/Images]
+        CDN[CDN]
+    end
+    LB --> API
+    LB --> CDN
+"#;
+        let presentation = Presentation::new()
+            .with_profile(PresentationProfile::MermanModern)
+            .with_theme(HostTheme::from_preset(HostThemePreset::OneDark));
+        let resolved = presentation.resolve();
+        let renderer = Renderer::new().with_engine(resolved.materialize_engine(merman::Engine::new()));
+        let request = SvgRequest {
+            pipeline: Some(SvgPipeline::resvg_safe()),
+            presentation: resolved.render_policy(),
+            ..Default::default()
+        };
+        let output = renderer.render(RenderRequest::svg(diagram, OperationControl::new(), request))
+            .expect("merman render failed");
+        if let RenderOutput::Svg(Some(svg_output)) = output {
+            let svg = svg_output.svg();
+            std::fs::write("/tmp/diagram.svg", &svg).unwrap();
+            eprintln!("SVG saved to /tmp/diagram.svg, len: {}", svg.len());
+        }
     }
 
     #[test]

@@ -7,12 +7,14 @@ edition.workspace = true
 futures-util.workspace = true
 gpui-kit.workspace = true
 markdown = "1.0.0"
-mermaid-rs-renderer = { version = "0.3.1", default-features = false }
+merman = "0.8.0"
 open = "5.4.4"
 pulldown-cmark.workspace = true
+resvg = "0.45.1"
 serde_json.workspace = true
 sofia-config.workspace = true
 sofia-content.workspace = true
 sofia-protocol.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
+usvg = "0.45.1"

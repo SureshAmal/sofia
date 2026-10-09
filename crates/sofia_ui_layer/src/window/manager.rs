@@ -107,7 +107,7 @@ impl WindowManager {
             self.panels.retain(|panel| {
                 !panel
                     .closing
-                    .is_some_and(|time| time.elapsed() > Duration::from_millis(700))
+                    .is_some_and(|time| time.elapsed() > Duration::from_millis(250))
             });
         }
         changed
@@ -172,15 +172,26 @@ impl WindowManager {
     }
 
     pub fn is_dragging(&self, cx: &App) -> bool {
-        self.panels.iter().any(|panel| panel.view.read(cx).dragging)
+        self.panels
+            .iter()
+            .any(|panel| panel.view.read(cx).dragging || panel.view.read(cx).resizing)
     }
 
     pub fn on_drag_end(&self, cx: &mut App) {
         for panel in &self.panels {
-            if panel.view.read(cx).dragging {
+            if panel.view.read(cx).dragging || panel.view.read(cx).resizing {
                 panel.view.update(cx, |view, cx| {
                     view.on_drag_end(cx);
+                    view.on_resize_end(cx);
                 });
+            }
+        }
+    }
+
+    pub fn on_resize_end(&self, cx: &mut App) {
+        for panel in &self.panels {
+            if panel.view.read(cx).resizing {
+                panel.view.update(cx, |view, cx| view.on_resize_end(cx));
             }
         }
     }
@@ -195,6 +206,7 @@ impl WindowManager {
     ) -> Vec<Bounds<Pixels>> {
         self.panels
             .iter_mut()
+            .filter(|panel| panel.closing.is_none())
             .map(|panel| {
                 let anchor = *panel.anchor.get_or_insert(pill);
                 let view = panel.view.read(cx);
@@ -247,7 +259,7 @@ impl WindowManager {
                     rem,
                 );
                 let closing = panel.closing.is_some();
-                let dragging = view.dragging;
+                let dragging = view.dragging || view.resizing;
                 let dragged_once = view.dragged_once;
                 let radius = f32::from(cx.theme().radius_lg);
                 let doc_id = view.doc.id.clone();
@@ -263,14 +275,14 @@ impl WindowManager {
                         .clone()
                         .cached(StyleRefinement::default().size_full()),
                 );
-                let content = if dragging || dragged_once {
+                let content = if dragging || dragged_once || closing {
                     content.into_any_element()
                 } else {
                     content
                         .with_spring(
                             SharedString::from(format!("{id}-content")),
                             SpringAnimation::new(SpringConfig::new(250., 30., 1.))
-                                .to(if closing { 0. } else { 1. })
+                                .to(1.)
                                 .from(0.),
                             |this, value| this.opacity(((value - 0.2) / 0.8).clamp(0., 1.)),
                         )
@@ -285,18 +297,8 @@ impl WindowManager {
                     .border_1()
                     .border_color(cx.theme().border)
                     .bg(cx.theme().background.opacity(0.95))
-                    .when(!dragging, |this| this.shadow_lg())
-                    .on_hover({
-                        let view_hover = panel.view.clone();
-                        move |hovered, _, cx| {
-                            view_hover.update(cx, |view, cx| {
-                                if !view.dragging && view.hovered != *hovered {
-                                    view.hovered = *hovered;
-                                    cx.notify();
-                                }
-                            });
-                        }
-                    })
+                    .opacity(1.0)
+                    .when(!dragging && !closing, |this| this.shadow_lg())
                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                         let id = focus_id.clone();
                         parent_focus.update(cx, |pill, cx| {
@@ -312,12 +314,35 @@ impl WindowManager {
                         .w(target.size.width)
                         .h(target.size.height)
                         .into_any_element()
+                } else if let Some(closing_time) = panel.closing {
+                    let elapsed = closing_time.elapsed().as_secs_f32();
+                    let from_x = f32::from(target.origin.x);
+                    let from_y = f32::from(target.origin.y);
+                    let from_w = f32::from(target.size.width);
+                    let from_h = f32::from(target.size.height);
+                    element
+                        .with_spring(
+                            SharedString::from(format!("{id}-close-morph")),
+                            SpringAnimation::new(SpringConfig::new(320., 30., 1.))
+                                .to(1.)
+                                .from((elapsed / 0.25).clamp(0., 1.)),
+                            move |this, value| {
+                                let t = value.clamp(0., 1.);
+                                let mix = |from: f32, to: f32| from + (to - from) * t;
+                                this.left(px(mix(from_x, pill.0)))
+                                    .top(px(mix(from_y, pill.1)))
+                                    .w(px(mix(from_w, pill_size.0)))
+                                    .h(px(mix(from_h, pill_size.1)))
+                                    .rounded(px(mix(radius, pill_size.0.min(pill_size.1) / 2.)))
+                            },
+                        )
+                        .into_any_element()
                 } else {
                     element
                         .with_spring(
                             SharedString::from(format!("{id}-morph")),
                             SpringAnimation::new(SpringConfig::new(280., 28., 1.))
-                                .to(if closing { 0. } else { 1. })
+                                .to(1.)
                                 .from(0.),
                             move |this, value| {
                                 let t = value.clamp(0., 1.);

@@ -335,6 +335,7 @@ impl PillView {
 
     fn on_mouse_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.documents.on_drag_end(cx);
+        self.documents.on_resize_end(cx);
         // A drag temporarily gives the entire layer an input region. Reapply
         // the restricted hitboxes even when their geometry has not changed.
         self.last_input_regions = None;
@@ -741,7 +742,12 @@ impl Render for PillView {
                         view.update(cx, |view, cx| view.on_mouse_move(event, cx));
                     }
                 })
-                .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                // Native GPUI drag events are handled in the capture phase.  A
+                // normal bubbling mouse-up can be swallowed by the dragged
+                // title bar, leaving the input region and drag state active.
+                // Capture every release on the full-screen layer so both the
+                // document and pill drag lifecycles always terminate.
+                .capture_any_mouse_up(move |_, window, cx| {
                     if let Some(view) = view_up.upgrade() {
                         view.update(cx, |view, cx| view.on_mouse_up(window, cx));
                     }
