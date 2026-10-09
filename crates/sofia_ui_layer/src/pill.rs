@@ -286,6 +286,7 @@ impl PillView {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        self.documents.on_mouse_move(event, cx);
         let Some((offset_x, offset_y)) = self.drag_offset else {
             return;
         };
@@ -326,6 +327,7 @@ impl PillView {
     }
 
     fn on_mouse_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.documents.on_mouse_up(cx);
         if self.drag_offset.take().is_none() {
             return;
         }
@@ -663,7 +665,7 @@ impl Render for PillView {
             };
             if !ready {
                 window.set_input_region(Some(&[]));
-            } else if self.drag_offset.is_none() {
+            } else if self.drag_offset.is_none() && !self.documents.is_dragging(cx) {
                 let mut regions =
                     self.documents
                         .regions((input_x, input_y), input_size, self.viewport, rem, cx);
@@ -704,6 +706,7 @@ impl Render for PillView {
                 .id("sofia-layer")
                 .size_full()
                 .relative()
+                .child(gpui_kit::base::TextSelectionLayer)
                 .on_mouse_move(move |event, _, cx| {
                     if let Some(view) = view.upgrade() {
                         view.update(cx, |view, cx| view.on_mouse_move(event, cx));

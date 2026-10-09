@@ -1,8 +1,9 @@
 //! Native GPUI Kit presenters in the existing desktop layer.
 use gpui_kit::assets::IconName;
+use gpui_kit::base::input::Copy;
 use gpui_kit::component::{
-    ActiveTheme, Icon,
-    button::Button,
+    ActiveTheme, Icon, Sizable,
+    button::{Button, ButtonVariants as _},
     chart::{AreaChart, BarChart, LineChart, PieChart, RadarChart},
     checkbox::Checkbox,
     input::{Input, InputState},
@@ -175,6 +176,30 @@ impl WindowManager {
         }
     }
 
+    pub fn is_dragging(&self, cx: &App) -> bool {
+        self.panels.iter().any(|panel| panel.view.read(cx).dragging)
+    }
+
+    pub fn on_mouse_move(&self, event: &MouseMoveEvent, cx: &mut App) {
+        for panel in &self.panels {
+            if panel.view.read(cx).dragging {
+                panel.view.update(cx, |view, cx| {
+                    view.on_mouse_move(event, cx);
+                });
+            }
+        }
+    }
+
+    pub fn on_mouse_up(&self, cx: &mut App) {
+        for panel in &self.panels {
+            if panel.view.read(cx).dragging {
+                panel.view.update(cx, |view, cx| {
+                    view.on_mouse_up(cx);
+                });
+            }
+        }
+    }
+
     pub fn regions(
         &self,
         pill: (f32, f32),
@@ -191,7 +216,6 @@ impl WindowManager {
                 panel_bounds(
                     &view.doc,
                     view.drag_offset,
-                    view.minimized,
                     index,
                     pill,
                     pill_size,
@@ -218,7 +242,6 @@ impl WindowManager {
                 let target = panel_bounds(
                     &view.doc,
                     view.drag_offset,
-                    view.minimized,
                     index,
                     pill,
                     pill_size,
@@ -328,11 +351,9 @@ impl Placement {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn panel_bounds(
     doc: &Document,
     drag_offset: (f32, f32),
-    minimized: bool,
     index: usize,
     pill: (f32, f32),
     pill_size: (f32, f32),
@@ -340,12 +361,7 @@ pub(crate) fn panel_bounds(
     rem: f32,
 ) -> Bounds<Pixels> {
     let width = (doc.width_rem * rem).min((viewport.0 - rem * 2.).max(rem));
-    let normal_height = (doc.height_rem * rem).min((viewport.1 - rem * 2.).max(rem));
-    let height = if minimized {
-        (2.5 * rem).min(normal_height)
-    } else {
-        normal_height
-    };
+    let height = (doc.height_rem * rem).min((viewport.1 - rem * 2.).max(rem));
 
     let cascade = index as f32 * rem;
     let placement = Placement::parse(&doc.tags);
@@ -426,7 +442,6 @@ pub(crate) struct DocumentView {
     pub(crate) editing_item: Option<String>,
     pub(crate) pending_item: Option<TodoItem>,
     pub(crate) status: String,
-    pub(crate) minimized: bool,
     pub(crate) drag_offset: (f32, f32),
     pub(crate) dragging: bool,
     pub(crate) drag_start: Option<(f32, f32)>,
@@ -455,6 +470,7 @@ impl DocumentView {
                 TextViewState::markdown(&content, cx).selectable(true)
             }
         });
+
         let new_item = cx.new(|cx| InputState::new(window, cx).placeholder("New item"));
         let due =
             cx.new(|cx| InputState::new(window, cx).placeholder("Due time (optional ISO8601)"));
@@ -468,7 +484,6 @@ impl DocumentView {
             editing_item: None,
             pending_item: None,
             status: String::new(),
-            minimized: false,
             drag_offset: (0.0, 0.0),
             dragging: false,
             drag_start: None,
@@ -640,7 +655,9 @@ impl Render for DocumentView {
         let kind_badge = self.doc.content.kind();
         let placement = Placement::parse(&self.doc.tags);
 
-        let mut title_bar = div()
+        let drag_handle = div()
+            .flex_1()
+            .min_w_0()
             .flex()
             .items_center()
             .gap_2()
@@ -658,8 +675,6 @@ impl Render for DocumentView {
             )
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
                     .truncate()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_sm()
@@ -676,6 +691,13 @@ impl Render for DocumentView {
                     .child(kind_badge),
             );
 
+        let mut title_bar = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(drag_handle);
+
         if let Some(badge) = placement.label() {
             title_bar = title_bar.child(
                 div()
@@ -689,73 +711,27 @@ impl Render for DocumentView {
             );
         }
 
-        title_bar = title_bar
-            .child(
-                div()
-                    .cursor_pointer()
-                    .p_1()
-                    .rounded_md()
-                    .hover(|s| s.bg(cx.theme().muted))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, _, _, cx| {
-                            view.minimized = !view.minimized;
-                            cx.notify();
-                        }),
-                    )
-                    .child(
-                        Icon::new(if self.minimized {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::Minus
-                        })
-                        .size(px(14.0))
-                        .text_color(cx.theme().muted_foreground),
-                    ),
-            )
-            .child(
-                div()
-                    .cursor_pointer()
-                    .p_1()
-                    .rounded_md()
-                    .hover(|s| s.bg(cx.theme().danger.opacity(0.15)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, _, _, _| {
-                            let _ = view.commands.send(Command::Close(view.doc.id.clone()));
-                        }),
-                    )
-                    .child(
-                        Icon::new(IconName::X)
-                            .size(px(14.0))
-                            .text_color(cx.theme().muted_foreground),
-                    ),
-            );
+        let actions = div().flex().items_center().gap_1().child(
+            Button::new("close-window-btn")
+                .ghost()
+                .xsmall()
+                .icon(IconName::Close)
+                .tooltip("Close")
+                .on_click(cx.listener(|view, _, _, _| {
+                    let _ = view.commands.send(Command::Close(view.doc.id.clone()));
+                })),
+        );
 
-        if self.minimized {
-            return div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .justify_center()
-                .px_4()
-                .text_color(cx.theme().foreground)
-                .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _, cx| {
-                    view.on_mouse_move(event, cx);
-                }))
-                .on_mouse_up(MouseButton::Left, cx.listener(|view, _, _, cx| {
-                    view.on_mouse_up(cx);
-                }))
-                .child(title_bar)
-                .into_any_element();
-        }
+        title_bar = title_bar.child(actions);
 
         let body = match &self.doc.content {
-            Content::Note { .. } | Content::Html { .. } => TextView::new(&self.text)
-                .selectable(true)
-                .scrollable(true)
-                .size_full()
-                .into_any_element(),
+            Content::Note { .. } | Content::Html { .. } => {
+                TextView::new(&self.text)
+                    .selectable(true)
+                    .scrollable(true)
+                    .size_full()
+                    .into_any_element()
+            }
             Content::Todo { items } | Content::Reminder { items } => {
                 let mut list = div()
                     .id("todo-list")
@@ -773,54 +749,88 @@ impl Render for DocumentView {
                         .editing_item
                         .as_ref()
                         .is_some_and(|id| id == &item.id);
-                    list = list.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .p_1()
-                            .rounded_md()
-                            .hover(|s| s.bg(cx.theme().muted.opacity(0.5)))
-                            .child(
-                                Checkbox::new(SharedString::from(item.id.clone()))
-                                    .checked(item.done)
-                                    .on_click(cx.listener(
-                                        move |view, value: &bool, _, cx| {
-                                            view.todo_change(index, *value, cx)
-                                        },
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .cursor_pointer()
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |view, _, window, cx| {
-                                            view.edit_item(index, window, cx)
-                                        }),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .when(item.done, |this| this.line_through())
-                                            .opacity(if item.done { 0.6 } else { 1.0 })
-                                            .font_weight(if is_editing {
-                                                FontWeight::SEMIBOLD
-                                            } else {
-                                                FontWeight::NORMAL
-                                            })
-                                            .child(label),
-                                    ),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("remove-{}", item.id)))
-                                    .label("Remove")
-                                    .on_click(cx.listener(move |view, _, _, cx| {
-                                        view.remove_item(index, cx)
-                                    })),
-                            ),
-                    );
+
+                    if is_editing {
+                        list = list.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .p_1()
+                                .rounded_md()
+                                .bg(cx.theme().muted.opacity(0.3))
+                                .child(
+                                    Checkbox::new(SharedString::from(item.id.clone()))
+                                        .checked(item.done)
+                                        .on_click(cx.listener(
+                                            move |view, value: &bool, _, cx| {
+                                                view.todo_change(index, *value, cx)
+                                            },
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .child(Input::new(&self.new_item).w_full()),
+                                )
+                                .child(
+                                    Button::new("save-item")
+                                        .label("Save")
+                                        .on_click(cx.listener(|view, _, window, cx| {
+                                            view.add_item(window, cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("cancel-item")
+                                        .label("Cancel")
+                                        .on_click(cx.listener(|view, _, window, cx| {
+                                            view.cancel_edit(window, cx);
+                                        })),
+                                ),
+                        );
+                    } else {
+                        list = list.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .p_1()
+                                .rounded_md()
+                                .hover(|s| s.bg(cx.theme().muted.opacity(0.5)))
+                                .child(
+                                    Checkbox::new(SharedString::from(item.id.clone()))
+                                        .checked(item.done)
+                                        .on_click(cx.listener(
+                                            move |view, value: &bool, _, cx| {
+                                                view.todo_change(index, *value, cx)
+                                            },
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("todo-text-{}", item.id)))
+                                        .flex_1()
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |view, _, window, cx| {
+                                            view.edit_item(index, window, cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .when(item.done, |this| this.line_through())
+                                                .opacity(if item.done { 0.6 } else { 1.0 })
+                                                .child(label),
+                                        ),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!("remove-{}", item.id)))
+                                        .label("Remove")
+                                        .on_click(cx.listener(move |view, _, _, cx| {
+                                            view.remove_item(index, cx)
+                                        })),
+                                ),
+                        );
+                    }
                 }
                 list.into_any_element()
             }
@@ -877,9 +887,15 @@ impl Render for DocumentView {
             .size_full()
             .flex()
             .flex_col()
-            .gap_3()
-            .p_4()
+            .gap_2()
+            .p_2()
             .text_color(cx.theme().foreground)
+            .on_action(cx.listener(|_, _: &Copy, window, cx| {
+                let text = gpui_kit::base::TextSelection::selected_text(window, cx);
+                if !text.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }))
             .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _, cx| {
                 view.on_mouse_move(event, cx);
             }))
@@ -887,44 +903,31 @@ impl Render for DocumentView {
                 view.on_mouse_up(cx);
             }))
             .child(title_bar)
-            .child(div().flex_1().min_h_0().overflow_hidden().child(body));
+            .child(body);
 
         if matches!(
             self.doc.content,
             Content::Todo { .. } | Content::Reminder { .. }
-        ) {
-            let is_editing = self.editing_item.is_some();
-            let mut controls = div()
-                .flex()
-                .gap_2()
-                .child(div().flex_1().child(Input::new(&self.due).w_full()))
-                .child(
-                    Button::new("add")
-                        .label(if is_editing {
-                            "Save item"
-                        } else {
-                            "Add"
-                        })
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.add_item(window, cx)
-                        })),
-                );
-            if is_editing {
-                controls = controls.child(
-                    Button::new("cancel-edit")
-                        .label("Cancel")
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.cancel_edit(window, cx);
-                        })),
-                );
-            }
+        ) && self.editing_item.is_none() {
             root = root.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap_2()
                     .child(Input::new(&self.new_item).w_full())
-                    .child(controls),
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(div().flex_1().child(Input::new(&self.due).w_full()))
+                            .child(
+                                Button::new("add")
+                                    .label("Add")
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.add_item(window, cx)
+                                    })),
+                            ),
+                    ),
             );
         }
 
@@ -1005,7 +1008,7 @@ mod tests {
         let pill = (960., 20.);
         let pill_size = (200., 40.);
 
-        let b = panel_bounds(&doc, (0., 0.), false, 0, pill, pill_size, viewport, rem);
+        let b = panel_bounds(&doc, (0., 0.), 0, pill, pill_size, viewport, rem);
         let expected_w = 20. * rem;
         let expected_h = 15. * rem;
         assert_eq!(f32::from(b.size.width), expected_w);
@@ -1013,30 +1016,25 @@ mod tests {
         assert_eq!(f32::from(b.origin.x), (1920. - expected_w) / 2.);
         assert_eq!(f32::from(b.origin.y), (1080. - expected_h) / 2.);
 
-        // Minimized bounds height
-        let b_min = panel_bounds(&doc, (0., 0.), true, 0, pill, pill_size, viewport, rem);
-        assert_eq!(f32::from(b_min.size.height), 2.5 * rem);
-
         // Drag offset
-        let b_drag = panel_bounds(&doc, (50., -30.), false, 0, pill, pill_size, viewport, rem);
+        let b_drag = panel_bounds(&doc, (50., -30.), 0, pill, pill_size, viewport, rem);
         assert_eq!(f32::from(b_drag.origin.x), (1920. - expected_w) / 2. + 50.);
         assert_eq!(f32::from(b_drag.origin.y), (1080. - expected_h) / 2. - 30.);
 
         // Top-left placement
         doc.tags = vec!["pos:top_left".into()];
-        let b_tl = panel_bounds(&doc, (0., 0.), false, 0, pill, pill_size, viewport, rem);
+        let b_tl = panel_bounds(&doc, (0., 0.), 0, pill, pill_size, viewport, rem);
         assert_eq!(f32::from(b_tl.origin.x), rem * 0.75);
         assert_eq!(f32::from(b_tl.origin.y), rem * 0.75);
 
         // Top-right placement
         doc.tags = vec!["pos:top_right".into()];
-        let b_tr = panel_bounds(&doc, (0., 0.), false, 0, pill, pill_size, viewport, rem);
+        let b_tr = panel_bounds(&doc, (0., 0.), 0, pill, pill_size, viewport, rem);
         assert_eq!(f32::from(b_tr.origin.x), 1920. - expected_w - rem * 0.75);
         assert_eq!(f32::from(b_tr.origin.y), rem * 0.75);
 
         // Clamping within viewport
-        let b_clamped =
-            panel_bounds(&doc, (5000., 5000.), false, 0, pill, pill_size, viewport, rem);
+        let b_clamped = panel_bounds(&doc, (5000., 5000.), 0, pill, pill_size, viewport, rem);
         assert_eq!(f32::from(b_clamped.origin.x), 1920. - expected_w - rem * 0.5);
         assert_eq!(f32::from(b_clamped.origin.y), 1080. - expected_h - rem * 0.5);
     }
