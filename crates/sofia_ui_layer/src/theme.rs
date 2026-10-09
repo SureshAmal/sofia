@@ -44,6 +44,26 @@ pub fn apply_saved(window: Option<&mut Window>, cx: &mut App) {
 pub fn init(cx: &mut App) {
     apply_saved(None, cx);
     if let Ok(path) = sofia_config::settings_path() {
+        cx.spawn(async move |cx| {
+            let mut modified = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok();
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+                let next = std::fs::metadata(&path)
+                    .and_then(|meta| meta.modified())
+                    .ok();
+                if next != modified {
+                    modified = next;
+                    cx.update(|cx| apply_saved(None, cx));
+                }
+            }
+        })
+        .detach();
+    }
+    if let Ok(path) = sofia_config::settings_path() {
         let directory = path.parent().unwrap().join("themes");
         if std::fs::create_dir_all(&directory).is_ok() {
             let _ = ThemeRegistry::watch_dir(directory, cx, |cx| {

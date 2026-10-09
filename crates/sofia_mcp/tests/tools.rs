@@ -161,12 +161,8 @@ async fn documents_roundtrip_through_real_mcp_client() {
     // 5. Test sofia_list_windows with include_closed = true
     let list_windows_all = client
         .call_tool(
-            CallToolRequestParams::new("sofia_list_windows").with_arguments(
-                json!({"include_closed": true})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            ),
+            CallToolRequestParams::new("sofia_list_windows")
+                .with_arguments(json!({"include_closed": true}).as_object().unwrap().clone()),
         )
         .await
         .unwrap();
@@ -203,12 +199,8 @@ async fn documents_roundtrip_through_real_mcp_client() {
     // 7. Test sofia_delete_documents
     let del_res = client
         .call_tool(
-            CallToolRequestParams::new("sofia_delete_documents").with_arguments(
-                json!({"ids": [id]})
-                    .as_object()
-                    .unwrap()
-                    .clone(),
-            ),
+            CallToolRequestParams::new("sofia_delete_documents")
+                .with_arguments(json!({"ids": [id]}).as_object().unwrap().clone()),
         )
         .await
         .unwrap();

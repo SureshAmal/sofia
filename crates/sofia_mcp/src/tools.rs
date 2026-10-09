@@ -42,8 +42,9 @@ pub fn execute(store: &Store, name: &str, args: Value) -> Result<(Value, Option<
             let content: Content =
                 serde_json::from_value(args.get("content").cloned().ok_or("content is required")?)
                     .map_err(|e| e.to_string())?;
-            let mut tags: Vec<String> = serde_json::from_value(args.get("tags").cloned().unwrap_or(json!([])))
-                .map_err(|e| e.to_string())?;
+            let mut tags: Vec<String> =
+                serde_json::from_value(args.get("tags").cloned().unwrap_or(json!([])))
+                    .map_err(|e| e.to_string())?;
             if let Some(placement) = optional(&args, "placement") {
                 let tag = format!("pos:{}", placement);
                 tags.retain(|t| !t.starts_with("pos:"));
@@ -123,7 +124,10 @@ pub fn execute(store: &Store, name: &str, args: Value) -> Result<(Value, Option<
             return Ok((doc.json(), Some(doc.id)));
         }
         "sofia_list_windows" => {
-            let include_closed = args.get("include_closed").and_then(Value::as_bool).unwrap_or(false);
+            let include_closed = args
+                .get("include_closed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let open: Vec<sofia_content::DocumentSummary> = store
                 .open_documents()?
                 .into_iter()
@@ -148,17 +152,21 @@ pub fn execute(store: &Store, name: &str, args: Value) -> Result<(Value, Option<
             })
         }
         "sofia_delete_documents" => {
-            let ids: Vec<String> = if let Some(ids_array) = args.get("ids").and_then(Value::as_array) {
-                ids_array
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            } else if let Some(id_str) = args.get("id").and_then(Value::as_str) {
-                vec![id_str.to_string()]
-            } else {
-                return Err("Specify 'ids' (array of document IDs) or 'id' (single document ID) to delete".into());
-            };
+            let ids: Vec<String> =
+                if let Some(ids_array) = args.get("ids").and_then(Value::as_array) {
+                    ids_array
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                } else if let Some(id_str) = args.get("id").and_then(Value::as_str) {
+                    vec![id_str.to_string()]
+                } else {
+                    return Err(
+                    "Specify 'ids' (array of document IDs) or 'id' (single document ID) to delete"
+                        .into(),
+                );
+                };
             if ids.is_empty() {
                 return Err("No document IDs provided for deletion".into());
             }
@@ -195,13 +203,13 @@ fn content_schema() -> Value {
                 vec!["kind", "items"]
             }
             "chart" => {
-                properties["chart_type"] = json!({"type":"string","enum":["line","bar","area","pie","radar"]});
+                properties["chart_type"] =
+                    json!({"type":"string","enum":["line","bar","area","pie","radar"]});
                 properties["points"] = json!({"type":"array","items":object(json!({"label":{"type":"string"},"value":{"type":"number"}}),vec!["label","value"])});
                 vec!["kind", "chart_type", "points"]
             }
             _ => {
-                properties["html"] =
-                    json!({"type":"string","description":"HTML formatted document rendered with CSS styling and tables"});
+                properties["html"] = json!({"type":"string","description":"HTML formatted document rendered with CSS styling and tables"});
                 vec!["kind", "html"]
             }
         };
@@ -211,7 +219,17 @@ fn content_schema() -> Value {
 }
 pub fn declarations() -> Vec<Tool> {
     let selector = json!({"id":{"type":"string"},"title":{"type":"string","description":"Exact unique title; prefer ID"}});
-    let placements = json!(["pill", "center", "left", "right", "bottom", "top_left", "top_right", "bottom_left", "bottom_right"]);
+    let placements = json!([
+        "pill",
+        "center",
+        "left",
+        "right",
+        "bottom",
+        "top_left",
+        "top_right",
+        "bottom_left",
+        "bottom_right"
+    ]);
     let mut create = json!({
         "title":{"type":"string"},
         "tags":{"type":"array","items":{"type":"string"}},

@@ -18,23 +18,23 @@ pub fn load() -> Result<Settings, String> {
         .any(|server| server.id == "sofia")
         && let Ok(executable) = std::env::current_exe()
     {
-            let command = executable.with_file_name(if cfg!(windows) {
-                "sofia-mcp.exe"
-            } else {
-                "sofia-mcp"
+        let command = executable.with_file_name(if cfg!(windows) {
+            "sofia-mcp.exe"
+        } else {
+            "sofia-mcp"
+        });
+        if command.is_file() {
+            settings.mcp_servers.push(McpServerConfig {
+                name: "Sofia documents".into(),
+                id: "sofia".into(),
+                transport: McpTransport::Stdio {
+                    command: command.to_string_lossy().into_owned(),
+                    args: Vec::new(),
+                    env: Default::default(),
+                },
+                ..Default::default()
             });
-            if command.is_file() {
-                settings.mcp_servers.push(McpServerConfig {
-                    name: "Sofia documents".into(),
-                    id: "sofia".into(),
-                    transport: McpTransport::Stdio {
-                        command: command.to_string_lossy().into_owned(),
-                        args: Vec::new(),
-                        env: Default::default(),
-                    },
-                    ..Default::default()
-                });
-            }
+        }
     }
     Ok(settings)
 }
@@ -53,6 +53,19 @@ pub fn save(settings: &Settings) -> Result<(), String> {
     merge(
         &mut root,
         serde_json::to_value(settings).map_err(|error| error.to_string())?,
+    );
+    write_root(&path, &root)
+}
+
+pub fn save_appearance(appearance: &AppearanceSettings) -> Result<(), String> {
+    let path = settings_path()?;
+    let mut root = read_root(&path)?.unwrap_or_else(|| Value::Object(Map::new()));
+    let object = root
+        .as_object_mut()
+        .ok_or("settings root must be a JSON object")?;
+    merge(
+        object.entry("appearance").or_insert(Value::Null),
+        serde_json::to_value(appearance).map_err(|error| error.to_string())?,
     );
     write_root(&path, &root)
 }

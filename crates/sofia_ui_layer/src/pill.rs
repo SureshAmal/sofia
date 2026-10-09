@@ -84,7 +84,7 @@ impl PillView {
     }
 
     fn tick(&mut self, cx: &mut Context<Self>) {
-        let mut changed = self.documents.tick();
+        let mut changed = self.documents.tick(cx);
         while let Ok(update) = self.receiver.try_recv() {
             changed = true;
             match update {
@@ -294,7 +294,6 @@ impl PillView {
     }
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
-        self.documents.on_mouse_move(event, cx);
         let Some((offset_x, offset_y)) = self.drag_offset else {
             return;
         };
@@ -335,7 +334,11 @@ impl PillView {
     }
 
     fn on_mouse_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.documents.on_mouse_up(cx);
+        self.documents.on_drag_end(cx);
+        // A drag temporarily gives the entire layer an input region. Reapply
+        // the restricted hitboxes even when their geometry has not changed.
+        self.last_input_regions = None;
+        cx.notify();
         if self.drag_offset.take().is_none() {
             return;
         }
@@ -608,6 +611,7 @@ impl Render for PillView {
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, move |event, window, cx| {
                 if let Some(view) = view.upgrade() {
+                    gpui_kit::base::GlobalState::suppress_text_selection(cx);
                     view.update(cx, |view, _| view.on_mouse_down(event, window));
                 }
             })
@@ -730,6 +734,7 @@ impl Render for PillView {
                 .id("sofia-layer")
                 .size_full()
                 .relative()
+                .font_family(theme.font_family.clone())
                 .child(gpui_kit::base::TextSelectionLayer)
                 .on_mouse_move(move |event, _, cx| {
                     if let Some(view) = view.upgrade() {
@@ -748,6 +753,7 @@ impl Render for PillView {
             div()
                 .size_full()
                 .flex()
+                .font_family(theme.font_family.clone())
                 .items_center()
                 .justify_center()
                 .child(pill.w(rems(1.5)).h(rems(7.5)))

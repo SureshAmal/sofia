@@ -14,6 +14,13 @@ use sofia_ui_layer::ipc_client::{IpcClient, UiUpdate};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 type Picker = Entity<SelectState<SearchableVec<SharedString>>>;
+const RADII: [(&str, Option<u8>); 5] = [
+    ("Default", None),
+    ("Square", Some(0)),
+    ("Small", Some(4)),
+    ("Round", Some(10)),
+    ("More round", Some(16)),
+];
 pub struct SettingsView {
     settings: Settings,
     mcp: Entity<crate::mcp::McpPanel>,
@@ -22,6 +29,7 @@ pub struct SettingsView {
     output: Picker,
     output_ids: Vec<Option<String>>,
     theme: Picker,
+    theme_names: Vec<SharedString>,
     font: Picker,
     radius: Picker,
     voice: Picker,
@@ -109,20 +117,12 @@ impl SettingsView {
             .iter()
             .position(|id| id == &settings.audio.output_device_id);
         let output = picker(output_names, selected.unwrap_or(0), window, cx);
-        let mut themes: Vec<SharedString> = vec!["dark".into(), "light".into(), "system".into()];
-        themes.extend(
-            gpui_kit::component::ThemeRegistry::global(cx)
-                .themes()
-                .keys()
-                .cloned(),
-        );
-        themes.sort();
-        themes.dedup();
+        let themes = available_themes(cx);
         let selected = themes
             .iter()
             .position(|name| name.as_ref() == settings.appearance.theme)
             .unwrap_or(0);
-        let theme = picker(themes, selected, window, cx);
+        let theme = picker(themes.clone(), selected, window, cx);
         let mut fonts: Vec<SharedString> = vec!["System default".into()];
         let mut installed = cx.text_system().all_font_names();
         installed.sort_unstable_by_key(|name| name.to_lowercase());
@@ -135,13 +135,6 @@ impl SettingsView {
             .and_then(|family| fonts.iter().position(|name| name.as_ref() == family))
             .unwrap_or(0);
         let font = picker(fonts, selected, window, cx);
-        const RADII: [(&str, Option<u8>); 5] = [
-            ("Default", None),
-            ("Square", Some(0)),
-            ("Small", Some(4)),
-            ("Round", Some(10)),
-            ("More round", Some(16)),
-        ];
         let selected = RADII
             .iter()
             .position(|(_, value)| *value == settings.appearance.radius)
@@ -158,9 +151,25 @@ impl SettingsView {
         cx.subscribe_in(&theme, window, |view, _, event, window, cx| {
             if let SelectEvent::Confirm(Some(name)) = event {
                 view.settings.appearance.theme = name.to_string();
-                super::apply_theme(name, Some(window), cx);
-                view.status = "Theme preview. Save & apply to keep this preference.".into();
-                cx.notify();
+                view.save_appearance(window, cx);
+            }
+        })
+        .detach();
+        cx.subscribe_in(&font, window, |view, _, event, window, cx| {
+            if let SelectEvent::Confirm(Some(name)) = event {
+                view.settings.appearance.font_family =
+                    (name.as_ref() != "System default").then(|| name.to_string());
+                view.save_appearance(window, cx);
+            }
+        })
+        .detach();
+        cx.subscribe_in(&radius, window, |view, _, event, window, cx| {
+            if let SelectEvent::Confirm(Some(name)) = event {
+                view.settings.appearance.radius = RADII
+                    .iter()
+                    .find(|(label, _)| *label == name.as_ref())
+                    .and_then(|(_, radius)| *radius);
+                view.save_appearance(window, cx);
             }
         })
         .detach();
@@ -200,6 +209,7 @@ impl SettingsView {
             output,
             output_ids,
             theme,
+            theme_names: themes,
             font,
             radius,
             voice,
@@ -211,7 +221,17 @@ impl SettingsView {
             updates,
         }
     }
-    fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn save_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.status = match sofia_config::save_appearance(&self.settings.appearance) {
+            Ok(()) => {
+                super::apply_theme(&self.settings.appearance.theme, Some(window), cx);
+                "Appearance updated.".into()
+            }
+            Err(error) => error,
+        };
+        cx.notify();
+    }
+    fn save(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.settings.mcp_servers = match self.mcp.read(cx).collect(cx) {
             Ok(configs) => configs,
             Err(error) => {
@@ -247,28 +267,11 @@ impl SettingsView {
             .selected_index(cx)
             .and_then(|index| self.output_ids.get(index.row).cloned())
             .flatten();
-        if let Some(name) = self.theme.read(cx).selected_value() {
-            self.settings.appearance.theme = name.to_string();
+        if let Ok(saved) = sofia_config::load() {
+            self.settings.appearance = saved.appearance;
         }
-        self.settings.appearance.font_family = self
-            .font
-            .read(cx)
-            .selected_value()
-            .filter(|name| name.as_ref() != "System default")
-            .map(|name| name.to_string());
-        self.settings.appearance.radius = self
-            .radius
-            .read(cx)
-            .selected_index(cx)
-            .and_then(|index| {
-                [None, Some(0), Some(4), Some(10), Some(16)]
-                    .get(index.row)
-                    .copied()
-            })
-            .flatten();
         self.status = match sofia_config::save(&self.settings) {
             Ok(()) => {
-                super::apply_theme(&self.settings.appearance.theme, Some(window), cx);
                 if self.connected {
                     self.ipc.send(ClientRequest::ReloadSettings);
                     "Saved. Sofia is reconnecting to apply your settings.".into()
@@ -297,6 +300,18 @@ fn picker(
         .searchable(true)
     })
 }
+fn available_themes(cx: &App) -> Vec<SharedString> {
+    let mut names: Vec<SharedString> = vec!["dark".into(), "light".into(), "system".into()];
+    names.extend(
+        gpui_kit::component::ThemeRegistry::global(cx)
+            .themes()
+            .keys()
+            .cloned(),
+    );
+    names.sort();
+    names.dedup();
+    names
+}
 fn field(label: &'static str, state: &Entity<InputState>) -> SettingItem {
     let state = state.clone();
     SettingItem::new(
@@ -310,7 +325,16 @@ fn field(label: &'static str, state: &Entity<InputState>) -> SettingItem {
     .layout(Axis::Vertical)
 }
 impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let names = available_themes(cx);
+        if names != self.theme_names {
+            self.theme_names = names.clone();
+            let selected = self.settings.appearance.theme.clone();
+            self.theme.update(cx, |state, cx| {
+                state.set_items(SearchableVec::new(names), window, cx);
+                state.set_selected_value(&SharedString::from(selected), window, cx);
+            });
+        }
         let prompt = self.prompt.clone();
         let dirty_prompt = prompt.clone();
         let reset_prompt = prompt.clone();

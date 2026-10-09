@@ -1,19 +1,19 @@
 use gpui_kit::assets::IconName;
 use gpui_kit::base::input::Copy;
+use gpui_kit::base::{ElementExt, TextSelectionScopeId};
 use gpui_kit::component::{
     ActiveTheme, Icon, Sizable,
     button::{Button, ButtonVariants as _},
     chart::{AreaChart, BarChart, LineChart, PieChart, RadarChart},
     checkbox::Checkbox,
     input::{Input, InputState},
-    text::{TextView, TextViewState},
+    text::{MarkdownExtensions, TextView, TextViewState},
 };
-use gpui_kit::base::{ElementExt, TextSelectionScopeId};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use pulldown_cmark::{Event, Options, Parser};
 use sofia_content::{ChartPoint, ChartType, Content, Document, TodoItem};
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, OnceLock, mpsc};
 
 pub(crate) enum Command {
     Save(Document),
@@ -38,9 +38,21 @@ pub(crate) struct DocumentView {
     pub(crate) editing_item: Option<String>,
     pub(crate) pending_item: Option<TodoItem>,
     pub(crate) status: String,
+    pub(crate) hovered: bool,
     pub(crate) drag_offset: (f32, f32),
     pub(crate) dragging: bool,
-    pub(crate) drag_start: Option<(f32, f32)>,
+    pub(crate) dragged_once: bool,
+    pub(crate) drag_start_cursor: Option<(f32, f32)>,
+    pub(crate) drag_start_offset: (f32, f32),
+}
+
+#[derive(Clone)]
+pub(crate) struct WindowDrag(pub(crate) EntityId);
+
+impl Render for WindowDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
 }
 
 pub fn parse_markdown_blocks(markdown: &str) -> Vec<std::ops::Range<usize>> {
@@ -109,9 +121,12 @@ impl DocumentView {
             editing_item: None,
             pending_item: None,
             status: String::new(),
+            hovered: false,
             drag_offset: (0.0, 0.0),
             dragging: false,
-            drag_start: None,
+            dragged_once: false,
+            drag_start_cursor: None,
+            drag_start_offset: (0.0, 0.0),
         }
     }
 
@@ -136,44 +151,34 @@ impl DocumentView {
         cx.notify();
     }
 
-    pub(crate) fn on_mouse_down(
-        &mut self,
-        event: &MouseDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn on_drag_start(&mut self, cursor: (f32, f32), window: &mut Window) {
         self.dragging = true;
-        self.drag_start = Some((f32::from(event.position.x), f32::from(event.position.y)));
+        self.dragged_once = true;
+        self.drag_start_cursor = Some(cursor);
+        self.drag_start_offset = self.drag_offset;
         window.set_input_region(None);
-        cx.notify();
     }
 
-    pub(crate) fn on_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+    pub(crate) fn on_drag_move_event(&mut self, cursor: (f32, f32), cx: &mut Context<Self>) {
         if !self.dragging {
             return;
         }
-        if !event.dragging() {
-            self.dragging = false;
-            self.drag_start = None;
-            cx.notify();
+        let Some((start_x, start_y)) = self.drag_start_cursor else {
             return;
-        }
-        if let Some((start_x, start_y)) = self.drag_start {
-            let current_x = f32::from(event.position.x);
-            let current_y = f32::from(event.position.y);
-            let dx = current_x - start_x;
-            let dy = current_y - start_y;
-            self.drag_offset.0 += dx;
-            self.drag_offset.1 += dy;
-            self.drag_start = Some((current_x, current_y));
-            cx.notify();
-        }
+        };
+        let dx = cursor.0 - start_x;
+        let dy = cursor.1 - start_y;
+        self.drag_offset = (
+            self.drag_start_offset.0 + dx,
+            self.drag_start_offset.1 + dy,
+        );
+        cx.notify();
     }
 
-    pub(crate) fn on_mouse_up(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn on_drag_end(&mut self, cx: &mut Context<Self>) {
         if self.dragging {
             self.dragging = false;
-            self.drag_start = None;
+            self.drag_start_cursor = None;
             cx.notify();
         }
     }
@@ -190,12 +195,7 @@ impl DocumentView {
         }
     }
 
-    pub(crate) fn edit_item(
-        &mut self,
-        index: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn edit_item(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         if let Content::Todo { items } | Content::Reminder { items } = &self.doc.content
             && let Some(item) = items.get(index).cloned()
         {
@@ -283,6 +283,7 @@ impl DocumentView {
         };
 
         let drag_handle = div()
+            .id(SharedString::from(format!("drag-handle-{}", self.doc.id)))
             .flex_1()
             .min_w_0()
             .flex()
@@ -292,9 +293,20 @@ impl DocumentView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|view, event: &MouseDownEvent, window, cx| {
-                    view.on_mouse_down(event, window, cx);
+                    gpui_kit::base::GlobalState::suppress_text_selection(cx);
+                    view.on_drag_start((f32::from(event.position.x), f32::from(event.position.y)), window);
                 }),
             )
+            .on_drag(WindowDrag(cx.entity_id()), |drag, _, _, cx| {
+                cx.stop_propagation();
+                cx.new(|_| drag.clone())
+            })
+            .on_drag_move(cx.listener(|view, event: &DragMoveEvent<WindowDrag>, _, cx| {
+                if event.drag(cx).0 == cx.entity_id() {
+                    let cursor = (f32::from(event.event.position.x), f32::from(event.event.position.y));
+                    view.on_drag_move_event(cursor, cx);
+                }
+            }))
             .child(
                 Icon::new(kind_icon)
                     .size(px(15.0))
@@ -306,16 +318,6 @@ impl DocumentView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_sm()
                     .child(self.doc.title.clone()),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .px_1p5()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(cx.theme().muted)
-                    .text_color(cx.theme().muted_foreground)
-                    .child(self.doc.content.kind()),
             );
 
         let mut bar = div()
@@ -325,37 +327,40 @@ impl DocumentView {
             .gap_2()
             .child(drag_handle);
 
-        if let Content::Note { markdown } = &self.doc.content {
-            let note_markdown = markdown.clone();
-            let note_id = self.doc.id.clone();
+        if self.hovered {
+            if let Content::Note { markdown } = &self.doc.content {
+                let note_markdown = markdown.clone();
+                let note_id = self.doc.id.clone();
+                bar = bar.child(
+                    Button::new("open-external-btn")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ExternalLink)
+                        .tooltip("Open in external editor")
+                        .on_click(cx.listener(move |_view, _, _, _| {
+                            let temp_dir = std::env::temp_dir();
+                            let file_path = temp_dir.join(format!("sofia_note_{}.md", note_id));
+                            if std::fs::write(&file_path, &note_markdown).is_ok() {
+                                let _ = open::that(&file_path);
+                            }
+                        })),
+                );
+            }
+
+            let doc_id = self.doc.id.clone();
             bar = bar.child(
-                Button::new("open-external-btn")
+                Button::new("close-window-btn")
                     .ghost()
                     .xsmall()
-                    .icon(IconName::ExternalLink)
-                    .tooltip("Open in external editor")
-                    .on_click(cx.listener(move |_view, _, _, _| {
-                        let temp_dir = std::env::temp_dir();
-                        let file_path = temp_dir.join(format!("sofia_note_{}.md", note_id));
-                        if std::fs::write(&file_path, &note_markdown).is_ok() {
-                            let _ = open::that(&file_path);
-                        }
+                    .icon(IconName::Close)
+                    .tooltip("Close window")
+                    .on_click(cx.listener(move |view, _, _, _| {
+                        let _ = view.commands.send(Command::Close(doc_id.clone()));
                     })),
             );
         }
 
-        let doc_id = self.doc.id.clone();
-        bar.child(
-            Button::new("close-window-btn")
-                .ghost()
-                .xsmall()
-                .icon(IconName::Close)
-                .tooltip("Close window")
-                .on_click(cx.listener(move |view, _, _, _| {
-                    let _ = view.commands.send(Command::Close(doc_id.clone()));
-                })),
-        )
-        .into_any_element()
+        bar.into_any_element()
     }
 
     fn render_note(&self, _cx: &Context<Self>) -> AnyElement {
@@ -363,7 +368,13 @@ impl DocumentView {
             .selectable(true)
             .scrollable(true)
             .size_full()
-            .markdown_block_parser(|node, _ctx| {
+            .markdown_extensions(Self::note_extensions().clone())
+            .into_any_element()
+    }
+
+    fn note_extensions() -> &'static MarkdownExtensions {
+        static EXTENSIONS: OnceLock<MarkdownExtensions> = OnceLock::new();
+        EXTENSIONS.get_or_init(|| MarkdownExtensions::default().block_parser(|node, _ctx| {
                 if let markdown::mdast::Node::Code(code) = node
                     && code.lang.as_deref() == Some("mermaid")
                 {
@@ -386,7 +397,7 @@ impl DocumentView {
                 }
                 None
             })
-            .markdown_block_renderer("mermaid", |node, _window, cx| {
+            .block_renderer("mermaid", |node, _window, cx| {
                 if let Some(block) = node.data::<MermaidBlock>() {
                     if let Some(ref err) = block.error {
                         return div()
@@ -410,8 +421,7 @@ impl DocumentView {
                         .into_any_element();
                 }
                 div().into_any_element()
-            })
-            .into_any_element()
+            }))
     }
 
     fn render_todo_items(&self, items: &[TodoItem], cx: &Context<Self>) -> AnyElement {
@@ -428,10 +438,7 @@ impl DocumentView {
             } else {
                 item.text.clone()
             };
-            let is_editing = self
-                .editing_item
-                .as_ref()
-                .is_some_and(|id| id == &item.id);
+            let is_editing = self.editing_item.as_ref().is_some_and(|id| id == &item.id);
 
             if is_editing {
                 list = list.child(
@@ -518,7 +525,12 @@ impl DocumentView {
         list.into_any_element()
     }
 
-    fn render_chart(&self, chart_type: &ChartType, points: &[ChartPoint], cx: &Context<Self>) -> AnyElement {
+    fn render_chart(
+        &self,
+        chart_type: &ChartType,
+        points: &[ChartPoint],
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let labels = points
             .iter()
             .map(|point| point.label.clone())
@@ -621,6 +633,7 @@ impl Render for DocumentView {
         }
 
         let mut root = div()
+            .id(SharedString::from(format!("doc-view-root-{}", self.doc.id)))
             .size_full()
             .flex()
             .flex_col()
@@ -633,15 +646,6 @@ impl Render for DocumentView {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
             }))
-            .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _, cx| {
-                view.on_mouse_move(event, cx);
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|view, _, _, cx| {
-                    view.on_mouse_up(cx);
-                }),
-            )
             .child(title_bar)
             .child(body);
 

@@ -1,5 +1,6 @@
 //! Window manager orchestrating panels, animations, and IPC sync.
 use gpui_kit::component::ActiveTheme;
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use sofia_content::{Document, Store};
 use std::{
@@ -24,6 +25,7 @@ pub(crate) struct Panel {
     pub(crate) closing: Option<Instant>,
     pub(crate) generation: u64,
     pub(crate) slot: usize,
+    pub(crate) anchor: Option<(f32, f32)>,
     pub(crate) _subscription: Option<Subscription>,
 }
 
@@ -94,7 +96,7 @@ impl WindowManager {
         let _ = self.commands.send(Command::Refresh);
     }
 
-    pub fn tick(&mut self) -> bool {
+    pub fn tick(&mut self, _cx: &mut App) -> bool {
         let mut changed = false;
         while let Ok(update) = self.updates.try_recv() {
             self.pending.push(update);
@@ -145,6 +147,7 @@ impl WindowManager {
                                 closing: None,
                                 generation: NEXT_PANEL_GENERATION.fetch_add(1, Ordering::Relaxed),
                                 slot,
+                                anchor: None,
                                 _subscription: Some(subscription),
                             });
                         }
@@ -172,28 +175,18 @@ impl WindowManager {
         self.panels.iter().any(|panel| panel.view.read(cx).dragging)
     }
 
-    pub fn on_mouse_move(&self, event: &MouseMoveEvent, cx: &mut App) {
+    pub fn on_drag_end(&self, cx: &mut App) {
         for panel in &self.panels {
             if panel.view.read(cx).dragging {
                 panel.view.update(cx, |view, cx| {
-                    view.on_mouse_move(event, cx);
-                });
-            }
-        }
-    }
-
-    pub fn on_mouse_up(&self, cx: &mut App) {
-        for panel in &self.panels {
-            if panel.view.read(cx).dragging {
-                panel.view.update(cx, |view, cx| {
-                    view.on_mouse_up(cx);
+                    view.on_drag_end(cx);
                 });
             }
         }
     }
 
     pub fn regions(
-        &self,
+        &mut self,
         pill: (f32, f32),
         pill_size: (f32, f32),
         viewport: (f32, f32),
@@ -201,14 +194,15 @@ impl WindowManager {
         cx: &App,
     ) -> Vec<Bounds<Pixels>> {
         self.panels
-            .iter()
+            .iter_mut()
             .map(|panel| {
+                let anchor = *panel.anchor.get_or_insert(pill);
                 let view = panel.view.read(cx);
                 panel_bounds(
                     &view.doc,
                     view.drag_offset,
                     panel.slot,
-                    pill,
+                    anchor,
                     pill_size,
                     viewport,
                     rem,
@@ -230,7 +224,7 @@ impl WindowManager {
     }
 
     pub fn render(
-        &self,
+        &mut self,
         pill: (f32, f32),
         pill_size: (f32, f32),
         viewport: (f32, f32),
@@ -239,39 +233,70 @@ impl WindowManager {
         cx: &App,
     ) -> Vec<AnyElement> {
         self.panels
-            .iter()
+            .iter_mut()
             .map(|panel| {
+                let anchor = *panel.anchor.get_or_insert(pill);
                 let view = panel.view.read(cx);
                 let target = panel_bounds(
                     &view.doc,
                     view.drag_offset,
                     panel.slot,
-                    pill,
+                    anchor,
                     pill_size,
                     viewport,
                     rem,
                 );
                 let closing = panel.closing.is_some();
+                let dragging = view.dragging;
+                let dragged_once = view.dragged_once;
+                let radius = f32::from(cx.theme().radius_lg);
                 let doc_id = view.doc.id.clone();
                 let id = SharedString::from(format!(
                     "content-window-{}-{}",
-                    view.doc.id,
-                    panel.generation
+                    view.doc.id, panel.generation
                 ));
-                let view_entity = panel.view.clone();
-                let view_up = panel.view.clone();
                 let parent_focus = parent.clone();
                 let focus_id = doc_id.clone();
-                div()
+                let content = div().size_full().child(
+                    panel
+                        .view
+                        .clone()
+                        .cached(StyleRefinement::default().size_full()),
+                );
+                let content = if dragging || dragged_once {
+                    content.into_any_element()
+                } else {
+                    content
+                        .with_spring(
+                            SharedString::from(format!("{id}-content")),
+                            SpringAnimation::new(SpringConfig::new(250., 30., 1.))
+                                .to(if closing { 0. } else { 1. })
+                                .from(0.),
+                            |this, value| this.opacity(((value - 0.2) / 0.8).clamp(0., 1.)),
+                        )
+                        .into_any_element()
+                };
+                let element = div()
                     .id(id.clone())
                     .absolute()
                     .occlude()
                     .overflow_hidden()
-                    .rounded_xl()
+                    .rounded(cx.theme().radius_lg)
                     .border_1()
                     .border_color(cx.theme().border)
                     .bg(cx.theme().background.opacity(0.95))
-                    .shadow_lg()
+                    .when(!dragging, |this| this.shadow_lg())
+                    .on_hover({
+                        let view_hover = panel.view.clone();
+                        move |hovered, _, cx| {
+                            view_hover.update(cx, |view, cx| {
+                                if !view.dragging && view.hovered != *hovered {
+                                    view.hovered = *hovered;
+                                    cx.notify();
+                                }
+                            });
+                        }
+                    })
                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                         let id = focus_id.clone();
                         parent_focus.update(cx, |pill, cx| {
@@ -279,37 +304,33 @@ impl WindowManager {
                             cx.notify();
                         });
                     })
-                    .on_mouse_move(move |event, _, cx| {
-                        view_entity.update(cx, |view, cx| view.on_mouse_move(event, cx));
-                    })
-                    .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-                        view_up.update(cx, |view, cx| view.on_mouse_up(cx));
-                    })
-                    .child(
-                        div().size_full().child(panel.view.clone()).with_spring(
-                            SharedString::from(format!("{id}-content")),
-                            SpringAnimation::new(SpringConfig::new(250., 30., 1.))
+                    .child(content);
+                if dragging || dragged_once {
+                    element
+                        .left(target.origin.x)
+                        .top(target.origin.y)
+                        .w(target.size.width)
+                        .h(target.size.height)
+                        .into_any_element()
+                } else {
+                    element
+                        .with_spring(
+                            SharedString::from(format!("{id}-morph")),
+                            SpringAnimation::new(SpringConfig::new(280., 28., 1.))
                                 .to(if closing { 0. } else { 1. })
                                 .from(0.),
-                            |this, value| this.opacity(((value - 0.2) / 0.8).clamp(0., 1.)),
-                        ),
-                    )
-                    .with_spring(
-                        SharedString::from(format!("{id}-morph")),
-                        SpringAnimation::new(SpringConfig::new(280., 28., 1.))
-                            .to(if closing { 0. } else { 1. })
-                            .from(0.),
-                        move |this, value| {
-                            let t = value.clamp(0., 1.);
-                            let mix = |from: f32, to: f32| from + (to - from) * t;
-                            this.left(px(mix(pill.0, f32::from(target.origin.x))))
-                                .top(px(mix(pill.1, f32::from(target.origin.y))))
-                                .w(px(mix(pill_size.0, f32::from(target.size.width))))
-                                .h(px(mix(pill_size.1, f32::from(target.size.height))))
-                                .rounded(px(mix(pill_size.0 / 2., rem * 0.75)))
-                        },
-                    )
-                    .into_any_element()
+                            move |this, value| {
+                                let t = value.clamp(0., 1.);
+                                let mix = |from: f32, to: f32| from + (to - from) * t;
+                                this.left(px(mix(pill.0, f32::from(target.origin.x))))
+                                    .top(px(mix(pill.1, f32::from(target.origin.y))))
+                                    .w(px(mix(pill_size.0, f32::from(target.size.width))))
+                                    .h(px(mix(pill_size.1, f32::from(target.size.height))))
+                                    .rounded(px(mix(pill_size.0 / 2., radius)))
+                            },
+                        )
+                        .into_any_element()
+                }
             })
             .collect()
     }

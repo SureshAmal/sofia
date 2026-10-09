@@ -5,18 +5,19 @@ pub mod layout;
 pub mod manager;
 
 pub use document_view::parse_markdown_blocks;
-pub use layout::{panel_bounds, Placement};
+pub use layout::{Placement, panel_bounds};
 pub use manager::WindowManager;
 
 #[cfg(test)]
 mod tests {
     use super::document_view::parse_markdown_blocks;
-    use super::layout::{panel_bounds, Placement};
+    use super::layout::{Placement, panel_bounds};
     use sofia_content::{Content, Document};
 
     #[test]
     fn markdown_editor_keeps_top_level_blocks_intact() {
-        let source = "# Title\n\nA **bold** paragraph.\n\n- one\n- two\n\n```rust\nfn main() {}\n```";
+        let source =
+            "# Title\n\nA **bold** paragraph.\n\n- one\n- two\n\n```rust\nfn main() {}\n```";
         let blocks = parse_markdown_blocks(source);
         assert_eq!(
             blocks
@@ -38,8 +39,14 @@ mod tests {
         let rendered = mermaid_rs_renderer::render(diagram);
         assert!(rendered.is_ok(), "Mermaid rendering should succeed");
         let svg = rendered.unwrap();
-        assert!(svg.contains("<svg"), "Rendered output should contain <svg tag");
-        assert!(svg.contains("</svg>"), "Rendered output should contain </svg> tag");
+        assert!(
+            svg.contains("<svg"),
+            "Rendered output should contain <svg tag"
+        );
+        assert!(
+            svg.contains("</svg>"),
+            "Rendered output should contain </svg> tag"
+        );
     }
 
     #[test]
@@ -137,7 +144,13 @@ mod tests {
 
         // Clamping within viewport
         let b_clamped = panel_bounds(&doc, (5000., 5000.), 0, pill, pill_size, viewport, rem);
-        assert_eq!(f32::from(b_clamped.origin.x), 1920. - expected_w - rem * 0.5);
-        assert_eq!(f32::from(b_clamped.origin.y), 1080. - expected_h - rem * 0.5);
+        assert_eq!(
+            f32::from(b_clamped.origin.x),
+            1920. - expected_w - rem * 0.5
+        );
+        assert_eq!(
+            f32::from(b_clamped.origin.y),
+            1080. - expected_h - rem * 0.5
+        );
     }
 }
