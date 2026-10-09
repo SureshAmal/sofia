@@ -7881,6 +7881,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sofia-memory"
+version = "0.1.0"
+dependencies = [
+ "rmcp",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "sofia-protocol"
 version = "0.1.0"
 dependencies = [

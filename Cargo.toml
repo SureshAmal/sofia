@@ -10,6 +10,7 @@ edition = "2024"
 base64 = "0.22.1"
 rusqlite = { version = "0.38", features = ["bundled"] }
 sofia-content = { path = "crates/sofia_content" }
+sofia-memory = { path = "crates/sofia_memory" }
 cpal = "0.17.3"
 dotenvy = "0.15.7"
 futures-util = { version = "0.3.34", features = ["sink"] }

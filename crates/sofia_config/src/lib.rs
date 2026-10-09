@@ -12,28 +12,44 @@ pub use settings::*;
 
 pub fn load() -> Result<Settings, String> {
     let mut settings = load_at(&settings_path()?)?;
-    if !settings
-        .mcp_servers
-        .iter()
-        .any(|server| server.id == "sofia")
-        && let Ok(executable) = std::env::current_exe()
-    {
-        let command = executable.with_file_name(if cfg!(windows) {
-            "sofia-mcp.exe"
-        } else {
-            "sofia-mcp"
-        });
-        if command.is_file() {
-            settings.mcp_servers.push(McpServerConfig {
-                name: "Sofia documents".into(),
-                id: "sofia".into(),
-                transport: McpTransport::Stdio {
-                    command: command.to_string_lossy().into_owned(),
-                    args: Vec::new(),
-                    env: Default::default(),
-                },
-                ..Default::default()
+    if let Ok(executable) = std::env::current_exe() {
+        if !settings.mcp_servers.iter().any(|server| server.id == "sofia") {
+            let command = executable.with_file_name(if cfg!(windows) {
+                "sofia-mcp.exe"
+            } else {
+                "sofia-mcp"
             });
+            if command.is_file() {
+                settings.mcp_servers.push(McpServerConfig {
+                    name: "Sofia documents".into(),
+                    id: "sofia".into(),
+                    transport: McpTransport::Stdio {
+                        command: command.to_string_lossy().into_owned(),
+                        args: Vec::new(),
+                        env: Default::default(),
+                    },
+                    ..Default::default()
+                });
+            }
+        }
+        if !settings.mcp_servers.iter().any(|server| server.id == "memory") {
+            let command = executable.with_file_name(if cfg!(windows) {
+                "sofia-memory.exe"
+            } else {
+                "sofia-memory"
+            });
+            if command.is_file() {
+                settings.mcp_servers.push(McpServerConfig {
+                    name: "Sofia memory".into(),
+                    id: "memory".into(),
+                    transport: McpTransport::Stdio {
+                        command: command.to_string_lossy().into_owned(),
+                        args: Vec::new(),
+                        env: Default::default(),
+                    },
+                    ..Default::default()
+                });
+            }
         }
     }
     Ok(settings)
