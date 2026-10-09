@@ -25,6 +25,7 @@ sofia-config = { path = "crates/sofia_config" }
 sofia-protocol = { path = "crates/sofia_protocol" }
 sofia-ui-layer = { path = "crates/sofia_ui_layer" }
 sofia-mcp-client = { path = "crates/sofia_mcp_client" }
+sofia-trace-store = { path = "crates/sofia_trace_store" }
 thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["full"] }
 tokio-util = { version = "0.7.19", features = ["codec"] }

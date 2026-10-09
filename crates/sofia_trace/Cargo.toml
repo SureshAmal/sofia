@@ -6,3 +6,5 @@ edition.workspace = true
 [dependencies]
 gpui-kit.workspace = true
 sofia-protocol.workspace = true
+sofia-trace-store.workspace = true
+sofia-ui-layer.workspace = true

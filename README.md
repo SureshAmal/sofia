@@ -14,7 +14,7 @@ Dependencies shared across crates are declared once in `[workspace.dependencies]
 | [`sofia-ui-layer`](crates/sofia_ui_layer/) | GPUI Kit pill and content windows | Linux Wayland pill connected to livesofia |
 | [`sofia-mcp`](crates/sofia_mcp/) | MCP tools and user-content database | Crate boundary ready |
 | [`sofia-setting`](crates/sofia_setting/) | GPUI settings application | Native GPUI Kit Settings pages, prompt, Vertex credentials, audio and themes |
-| [`sofia-trace`](crates/sofia_trace/) | Separate tracing application | Crate boundary ready |
+| [`sofia-trace`](crates/sofia_trace/) | Separate tracing application | Recent runs and tool timelines |
 
 ```sh
 cargo test --workspace
@@ -22,6 +22,7 @@ cargo run -p livesofia --bin livesofia
 ```
 
 Run `cargo run -p sofia-ui-layer` for the pill and `cargo run -p sofia-setting` for settings.
+Run `cargo run -p sofia-trace` for the trace viewer. The daemon writes its run timeline to `~/.local/share/sofia/traces.db` (or `SOFIA_TRACE_DB`); restart `livesofia` after building this change to start recording.
 Sofia starts listening when Gemini connects unless automatic listening is disabled in settings.
 Left-click the pill to expand/collapse; right-click (two-finger touchpad tap) pauses/resumes capture and playback.
 Pausing stays Ready and discards the pending model response.

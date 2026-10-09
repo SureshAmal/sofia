@@ -305,6 +305,14 @@ async fn handle_session(
                     if paused { continue; }
                     let success = response.get("isError").and_then(serde_json::Value::as_bool) != Some(true);
                     hub.publish(ServerEvent::ToolCallFinished { call_id: id.clone(), name: name.clone(), success });
+                    if !success {
+                        let detail = response.get("error").and_then(serde_json::Value::as_str)
+                            .or_else(|| response.get("content")?.get(0)?.get("text")?.as_str())
+                            .unwrap_or("Tool returned an error");
+                        hub.publish(ServerEvent::Error {
+                            message: format!("{}: {}", name, detail.chars().take(512).collect::<String>()),
+                        });
+                    }
                     if let Err(error) = session.send_tool_response(vec![FunctionResponse { id, name, response }]).await {
                         warn!(%error,"MCP result could not be sent to Gemini");
                         break;
@@ -339,7 +347,7 @@ async fn handle_session(
                         let result = session.send_client_content(ClientContent {
                             turns: Some(vec![Content {
                                 role: Some("user".into()),
-                                parts: vec![Part { text: Some(text), inline_data: None }],
+                                parts: vec![Part { text: Some(text.clone()), inline_data: None }],
                             }]),
                             turn_complete: Some(true),
                         }).await;
@@ -347,6 +355,7 @@ async fn handle_session(
                             Ok(()) => {
                                 busy = true;
                                 hub.set_state(TurnState::Thinking, Some(session_id));
+                                hub.publish(ServerEvent::InputText { text });
                                 let _ = reply.send(Ok(()));
                             }
                             Err(error) => {

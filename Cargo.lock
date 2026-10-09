@@ -4195,6 +4195,7 @@ dependencies = [
  "sofia-config",
  "sofia-mcp-client",
  "sofia-protocol",
+ "sofia-trace-store",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
@@ -7203,6 +7204,17 @@ version = "0.1.0"
 dependencies = [
  "gpui-kit",
  "sofia-protocol",
+ "sofia-trace-store",
+ "sofia-ui-layer",
+]
+
+[[package]]
+name = "sofia-trace-store"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "sofia-protocol",
+ "uuid",
 ]
 
 [[package]]

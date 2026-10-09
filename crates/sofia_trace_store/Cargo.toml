@@ -1,0 +1,9 @@
+[package]
+name = "sofia-trace-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+sofia-protocol.workspace = true
+uuid.workspace = true

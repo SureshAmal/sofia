@@ -13,6 +13,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     dotenvy::from_path(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env")).ok();
     let hub = livesofia::state::EventHub::new();
+    match sofia_trace_store::Store::default_path().and_then(sofia_trace_store::Store::open) {
+        Ok(store) => {
+            let hub_for_trace = hub.clone();
+            let (_, mut events) = hub.subscribe();
+            tokio::spawn(async move {
+                let mut recorder = sofia_trace_store::Recorder::new(store);
+                loop {
+                    match events.recv().await {
+                        Ok(message) => {
+                            if let sofia_protocol::ServerBody::Event(event) = message.body
+                                && let Err(error) = recorder
+                                    .record(&event, hub_for_trace.snapshot().active_session_id)
+                            {
+                                tracing::warn!(%error, "could not record trace event");
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                            tracing::warn!(count, "trace recorder skipped events");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
+        Err(error) => tracing::warn!(%error, "trace storage unavailable"),
+    }
     match sofia_config::load_output_device_id() {
         Ok(device_id) => hub.set_output_device(device_id),
         Err(error) => tracing::warn!(%error, "could not load selected audio output"),
