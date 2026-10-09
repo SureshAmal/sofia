@@ -512,10 +512,13 @@ async fn handle_session(
                 audio_level_counter = audio_level_counter.wrapping_add(1);
                 if audio_level_counter.is_multiple_of(2) {
                     hub.publish(ServerEvent::InputAudioLevel { rms: chunk.rms });
-                    hub.publish(ServerEvent::AudioSpectrum {
-                        source: AudioSource::User,
-                        bins: livesofia::spectrum::pcm_i16_bands(&chunk.pcm, chunk.sample_rate),
-                    });
+                    // Skip FFT computation and IPC event broadcast during silence (< -55dB)
+                    if chunk.rms > 0.002 {
+                        hub.publish(ServerEvent::AudioSpectrum {
+                            source: AudioSource::User,
+                            bins: livesofia::spectrum::pcm_i16_bands(&chunk.pcm, chunk.sample_rate),
+                        });
+                    }
                 }
             }
             event = session.next_event() => {
