@@ -21,7 +21,7 @@ pub(crate) enum Command {
     Refresh,
 }
 
-type RenderedDiagram = Option<(Arc<[u8]>, f32, f32)>;
+type RenderedDiagram = Option<(Arc<gpui::Image>, f32, f32)>;
 
 #[derive(Clone)]
 pub(crate) struct MermaidBlock {
@@ -77,95 +77,27 @@ fn build_host_theme(theme: &gpui_kit::component::Theme) -> merman::svg::HostThem
         host = updated;
     }
 
-    if let Ok(h) = host
-        .clone()
-        .try_with_role(ThemeRole::Canvas, hsla_to_hex(theme.background))
-    {
-        host = h;
-    }
-    if let Ok(h) = host
-        .clone()
-        .try_with_role(ThemeRole::Surface, hsla_to_hex(theme.popover))
-    {
-        host = h;
-    }
-    if let Ok(h) = host
-        .clone()
-        .try_with_role(ThemeRole::SurfaceAlt, hsla_to_hex(theme.muted))
-    {
-        host = h;
-    }
-    if let Ok(h) = host
-        .clone()
-        .try_with_role(ThemeRole::SurfaceMuted, hsla_to_hex(theme.secondary))
-    {
-        host = h;
-    }
-    if let Ok(h) = host
-        .clone()
-        .try_with_role(ThemeRole::Text, hsla_to_hex(theme.foreground))
-    {
-        host = h;
-    }
-    if let Ok(h) = host
-        .clone()
-        .try_with_role(ThemeRole::SubtleText, hsla_to_hex(theme.muted_foreground))
-    {
-        host = h;
-    }
-    if let Ok(h) = host
-        .clone()
-        .try_with_role(ThemeRole::Border, hsla_to_hex(theme.border))
-    {
-        host = h;
-    }
-    if let Ok(h) = host
-        .clone()
-        .try_with_role(ThemeRole::Line, hsla_to_hex(theme.primary))
-    {
-        host = h;
-    }
-    if let Ok(h) = host
-        .clone()
-        .try_with_role(ThemeRole::ClusterBackground, hsla_to_hex(theme.popover))
-    {
-        host = h;
-    }
-    if let Ok(h) = host
-        .clone()
-        .try_with_role(ThemeRole::ClusterBorder, hsla_to_hex(theme.border))
-    {
-        host = h;
-    }
-    if let Ok(h) = host.clone().try_with_role(
-        ThemeRole::EdgeLabelBackground,
-        hsla_to_hex(theme.background),
-    ) {
-        host = h;
-    }
-    if let Ok(h) = host
-        .clone()
-        .try_with_role(ThemeRole::ActorBackground, hsla_to_hex(theme.popover))
-    {
-        host = h;
-    }
-    if let Ok(h) = host
-        .clone()
-        .try_with_role(ThemeRole::ActorBorder, hsla_to_hex(theme.border))
-    {
-        host = h;
-    }
-    if let Ok(h) = host
-        .clone()
-        .try_with_role(ThemeRole::ActorText, hsla_to_hex(theme.foreground))
-    {
-        host = h;
-    }
-    if let Ok(h) = host
-        .clone()
-        .try_with_role(ThemeRole::Error, hsla_to_hex(theme.red))
-    {
-        host = h;
+    let roles = [
+        (ThemeRole::Canvas, hsla_to_hex(theme.background)),
+        (ThemeRole::Surface, hsla_to_hex(theme.popover)),
+        (ThemeRole::SurfaceAlt, hsla_to_hex(theme.muted)),
+        (ThemeRole::SurfaceMuted, hsla_to_hex(theme.secondary)),
+        (ThemeRole::Text, hsla_to_hex(theme.foreground)),
+        (ThemeRole::SubtleText, hsla_to_hex(theme.muted_foreground)),
+        (ThemeRole::Border, hsla_to_hex(theme.border)),
+        (ThemeRole::Line, hsla_to_hex(theme.primary)),
+        (ThemeRole::ClusterBackground, hsla_to_hex(theme.popover)),
+        (ThemeRole::ClusterBorder, hsla_to_hex(theme.border)),
+        (ThemeRole::EdgeLabelBackground, hsla_to_hex(theme.background)),
+        (ThemeRole::ActorBackground, hsla_to_hex(theme.popover)),
+        (ThemeRole::ActorBorder, hsla_to_hex(theme.border)),
+        (ThemeRole::ActorText, hsla_to_hex(theme.foreground)),
+        (ThemeRole::Error, hsla_to_hex(theme.red)),
+    ];
+    for (role, color) in roles {
+        if let Ok(h) = host.clone().try_with_role(role, color) {
+            host = h;
+        }
     }
 
     let series = [
@@ -603,7 +535,7 @@ impl DocumentView {
         code: &str,
         theme: &gpui_kit::component::Theme,
         fontdb: &Arc<usvg::fontdb::Database>,
-    ) -> Result<(Arc<[u8]>, f32, f32), String> {
+    ) -> Result<(Arc<gpui::Image>, f32, f32), String> {
         use merman::svg::{Presentation, PresentationProfile, SvgPipeline};
         use merman::{OperationControl, RenderOutput, RenderRequest, Renderer, SvgRequest};
 
@@ -670,7 +602,8 @@ impl DocumentView {
         let png = pixmap
             .encode_png()
             .map_err(|e| format!("PNG encoding error: {e}"))?;
-        Ok((Arc::from(png.into_boxed_slice()), width, height))
+        let image = Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png));
+        Ok((image, width, height))
     }
 
     fn note_extensions() -> &'static MarkdownExtensions {
@@ -707,7 +640,7 @@ impl DocumentView {
                                     Self::render_mermaid_svg(&block.code, cx.theme(), &fontdb).ok();
                             }
 
-                            if let Some((png, width, height)) = guard.as_ref() {
+                            if let Some((image, width, height)) = guard.as_ref() {
                                 return div()
                                     .w_full()
                                     .my_3()
@@ -715,13 +648,10 @@ impl DocumentView {
                                     .justify_center()
                                     .items_center()
                                     .child(
-                                        gpui::img(Arc::new(gpui::Image::from_bytes(
-                                            gpui::ImageFormat::Png,
-                                            png.to_vec(),
-                                        )))
-                                        .w(px(*width))
-                                        .h(px(*height))
-                                        .max_w_full(),
+                                        gpui::img(image.clone())
+                                            .w(px(*width))
+                                            .h(px(*height))
+                                            .max_w_full(),
                                     )
                                     .into_any_element();
                             }

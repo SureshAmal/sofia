@@ -16,24 +16,23 @@ pub fn pcm_i16_bands(pcm: &[u8], sample_rate: u32) -> Vec<f32> {
     if sample_rate == 0 || pcm.len() < 2 {
         return vec![0.0; BANDS];
     }
-    let samples = pcm
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.0)
-        .collect::<Vec<_>>();
-    bands(&samples, sample_rate)
-}
+    let chunks = pcm.as_chunks::<2>().0;
+    let total_samples = chunks.len();
+    let take = total_samples.min(FFT_SIZE);
+    let start_idx = total_samples - take;
 
-fn bands(samples: &[f32], sample_rate: u32) -> Vec<f32> {
-    let mut input = vec![Complex32::new(0.0, 0.0); FFT_SIZE];
-    let take = samples.len().min(FFT_SIZE);
-    for (index, &sample) in samples[samples.len() - take..].iter().enumerate() {
+    let mut input = [Complex32::new(0.0, 0.0); FFT_SIZE];
+    for (index, bytes) in chunks[start_idx..].iter().enumerate() {
+        let sample = i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.0;
         let window =
             0.5 - 0.5 * (std::f32::consts::TAU * index as f32 / (FFT_SIZE - 1) as f32).cos();
         input[index].re = sample * window;
     }
-    fft().process(&mut input);
+    compute_bands(&mut input, sample_rate)
+}
+
+fn compute_bands(input: &mut [Complex32; FFT_SIZE], sample_rate: u32) -> Vec<f32> {
+    fft().process(input);
 
     let nyquist = sample_rate as f32 / 2.0;
     let max_frequency = nyquist.min(8_000.0);
@@ -61,20 +60,32 @@ fn bands(samples: &[f32], sample_rate: u32) -> Vec<f32> {
 }
 
 #[cfg(test)]
+fn samples_bands(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    let mut input = [Complex32::new(0.0, 0.0); FFT_SIZE];
+    let take = samples.len().min(FFT_SIZE);
+    for (index, &sample) in samples[samples.len() - take..].iter().enumerate() {
+        let window =
+            0.5 - 0.5 * (std::f32::consts::TAU * index as f32 / (FFT_SIZE - 1) as f32).cos();
+        input[index].re = sample * window;
+    }
+    compute_bands(&mut input, sample_rate)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn silence_is_zero_and_tone_has_a_frequency_peak() {
         assert!(
-            bands(&vec![0.0; FFT_SIZE], 24_000)
+            samples_bands(&[0.0; FFT_SIZE], 24_000)
                 .iter()
                 .all(|&v| v == 0.0)
         );
         let tone = (0..FFT_SIZE)
             .map(|n| (std::f32::consts::TAU * 1000.0 * n as f32 / 24_000.0).sin() * 0.5)
             .collect::<Vec<_>>();
-        let values = bands(&tone, 24_000);
+        let values = samples_bands(&tone, 24_000);
         let peak = values
             .iter()
             .enumerate()
