@@ -2,7 +2,7 @@
 
 `livesofia` records runs into a separate SQLite database while its existing IPC event hub publishes activity. The GPUI Kit trace application reads that database independently; it can be opened or closed without affecting audio, Gemini, or the pill.
 
-The viewer shows the last 100 runs and the selected run's ordered timeline. Each run shows its input, assistant output, status, duration, and tool count. Timeline rows show event order, relative time, tool duration, and error detail. The viewer refreshes when SQLite's data version changes; selecting an older run pauses automatic selection until **Latest run** is pressed.
+The viewer shows the last 100 runs in a GPUI Kit `DataTable`. Selecting a row opens its details through GPUI Kit `TabBar` tabs: Timeline, Input, Sofia, and Errors. The timeline is a second `DataTable`, and text details use selectable `TextView` components. Each run shows its status, duration, and tool count; timeline rows show relative time, tool duration, and error detail. The viewer refreshes when SQLite's data version changes; selecting an older run pauses automatic selection until the refresh icon selects the latest run.
 
 The recorder stores voice and text inputs, final spoken transcription, tool start/finish, cancellations, and daemon errors. A tool failure remains in the same run as the assistant response. A run left open by a daemon restart is marked `abandoned` on the next daemon start. Event bodies are limited to 4,096 characters and the database file is owner readable on Unix. Audio samples are not recorded.
 
@@ -11,6 +11,7 @@ The recorder stores voice and text inputs, final spoken transcription, tool star
 - `cargo test -p sofia-trace-store`: a two-run sequence verifies order, failure status, tool duration, and the following successful run.
 - `cargo check --workspace`: all crates compile.
 - `cargo build -p sofia-trace` and a short launch on the local Wayland session: the separate window mapped without a startup panic; its live database was populated with a sample run.
+- `cargo clippy -p sofia-trace --all-targets -- -D warnings` passes after the DataTable and Tabs layout update.
 
 ## Next optimizations
 

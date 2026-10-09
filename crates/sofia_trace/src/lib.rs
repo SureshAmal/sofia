@@ -1,14 +1,17 @@
-//! Separate desktop client for live activity and persisted trace reports.
+//! Separate GPUI Kit desktop client for Sofia runs and tool timelines.
+mod table;
+
+use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme, Sizable,
     button::Button,
-    scroll::ScrollableElement,
-    table::{Table, TableBody, TableCell, TableHead, TableHeader, TableRow},
+    tab::{Tab, TabBar},
+    table::{DataTable, TableEvent, TableState},
+    text::{TextView, TextViewState},
 };
-use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use sofia_trace_store::{Run, Step, Store};
+use sofia_trace_store::{Run, Store};
 use std::time::Duration;
+use table::{RunRows, StepRows};
 
 pub struct TraceView {
     store: Option<Store>,
@@ -16,12 +19,52 @@ pub struct TraceView {
     runs: Vec<Run>,
     selected: Option<String>,
     follow_latest: bool,
-    steps: Vec<Step>,
+    tab: usize,
+    run_table: Entity<TableState<RunRows>>,
+    step_table: Entity<TableState<StepRows>>,
+    input: Entity<TextViewState>,
+    output: Entity<TextViewState>,
+    failure: Entity<TextViewState>,
     error: String,
 }
 
 impl TraceView {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let run_table = cx.new(|cx| {
+            TableState::new(RunRows(vec![]), window, cx)
+                .row_selectable(true)
+                .col_resizable(false)
+                .col_movable(false)
+                .sortable(false)
+        });
+        let step_table = cx.new(|cx| {
+            TableState::new(
+                StepRows {
+                    rows: vec![],
+                    started_ms: 0,
+                },
+                window,
+                cx,
+            )
+            .row_selectable(false)
+            .col_resizable(false)
+            .col_movable(false)
+            .sortable(false)
+        });
+        cx.subscribe(&run_table, |view, _, event: &TableEvent, cx| {
+            if let TableEvent::SelectRow(index) = event {
+                view.select(*index, cx);
+            }
+        })
+        .detach();
+        let input = cx.new(|cx| TextViewState::markdown("", cx).selectable(true));
+        let output = cx.new(|cx| TextViewState::markdown("", cx).selectable(true));
+        let failure = cx.new(|cx| TextViewState::markdown("", cx).selectable(true));
+        let result = Store::default_path().and_then(Store::open);
+        let (store, error) = match result {
+            Ok(store) => (Some(store), String::new()),
+            Err(error) => (None, error),
+        };
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor()
@@ -33,18 +76,18 @@ impl TraceView {
             }
         })
         .detach();
-        let result = Store::default_path().and_then(Store::open);
-        let (store, error) = match result {
-            Ok(store) => (Some(store), String::new()),
-            Err(error) => (None, error),
-        };
         let mut view = Self {
             store,
             version: -1,
             runs: vec![],
             selected: None,
             follow_latest: true,
-            steps: vec![],
+            tab: 0,
+            run_table,
+            step_table,
+            input,
+            output,
+            failure,
             error,
         };
         view.refresh(cx);
@@ -69,12 +112,12 @@ impl TraceView {
                 {
                     self.selected = runs.first().map(|run| run.id.clone());
                 }
-                self.steps = self
-                    .selected
-                    .as_ref()
-                    .and_then(|id| store.steps(id).ok())
-                    .unwrap_or_default();
                 self.runs = runs;
+                self.run_table.update(cx, |table, cx| {
+                    table.delegate_mut().0 = self.runs.clone();
+                    table.refresh(cx);
+                });
+                self.update_detail(cx);
                 self.version = version;
                 self.error.clear();
                 cx.notify();
@@ -86,109 +129,138 @@ impl TraceView {
         }
     }
 
-    fn select(&mut self, id: String, cx: &mut Context<Self>) {
-        self.steps = self
-            .store
-            .as_ref()
-            .and_then(|store| store.steps(&id).ok())
-            .unwrap_or_default();
+    fn update_detail(&mut self, cx: &mut Context<Self>) {
+        let run = self
+            .runs
+            .iter()
+            .find(|run| self.selected.as_ref() == Some(&run.id));
+        let (steps, started, input, output, failure) = if let Some(run) = run {
+            (
+                self.store
+                    .as_ref()
+                    .and_then(|store| store.steps(&run.id).ok())
+                    .unwrap_or_default(),
+                run.started_ms,
+                run.input.clone(),
+                run.output.clone(),
+                run.error.clone(),
+            )
+        } else {
+            (vec![], 0, String::new(), String::new(), String::new())
+        };
+        self.step_table.update(cx, |table, cx| {
+            let delegate = table.delegate_mut();
+            delegate.rows = steps;
+            delegate.started_ms = started;
+            table.refresh(cx);
+        });
+        self.input
+            .update(cx, |state, cx| state.set_text(&input, cx));
+        self.output
+            .update(cx, |state, cx| state.set_text(&output, cx));
+        self.failure
+            .update(cx, |state, cx| state.set_text(&failure, cx));
+    }
+
+    fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(id) = self.runs.get(index).map(|run| run.id.clone()) else {
+            return;
+        };
+        if self.selected.as_ref() == Some(&id) {
+            return;
+        }
         self.selected = Some(id);
         self.follow_latest = false;
+        self.update_detail(cx);
         cx.notify();
     }
 
     fn latest(&mut self, cx: &mut Context<Self>) {
         self.follow_latest = true;
         self.selected = self.runs.first().map(|run| run.id.clone());
-        self.steps = self
-            .selected
-            .as_ref()
-            .and_then(|id| self.store.as_ref()?.steps(id).ok())
-            .unwrap_or_default();
+        self.update_detail(cx);
+        if !self.runs.is_empty() {
+            self.run_table
+                .update(cx, |table, cx| table.set_selected_row(0, cx));
+        }
         cx.notify();
     }
+}
 
-    fn runs_table(&self, cx: &mut Context<Self>) -> Table {
-        let mut body = TableBody::new();
-        for run in &self.runs {
-            let id = run.id.clone();
-            let selected = self.selected.as_ref() == Some(&id);
-            let title = if run.input.is_empty() {
-                "(system)".to_string()
-            } else {
-                summary(&run.input, 54)
-            };
-            body = body.child(
-                TableRow::new()
-                    .child(
-                        TableCell::new().child(
-                            Button::new(SharedString::from(id.clone()))
-                                .label(if selected {
-                                    format!("● {title}")
-                                } else {
-                                    title
-                                })
-                                .on_click(
-                                    cx.listener(move |view, _, _, cx| view.select(id.clone(), cx)),
-                                ),
-                        ),
-                    )
-                    .child(TableCell::new().child(format!(
-                        "{} · {} tools · {}",
-                        run.status,
-                        run.tool_count,
-                        duration(run.duration_ms)
-                    ))),
-            );
-        }
-        Table::new()
-            .small()
-            .accessibility_label("Recent Sofia runs")
+impl Render for TraceView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tabs = TabBar::new("trace-tabs")
+            .underline()
+            .selected_index(self.tab)
+            .child(Tab::new().label("Timeline"))
+            .child(Tab::new().label("Input"))
+            .child(Tab::new().label("Sofia"))
+            .child(Tab::new().label("Errors"))
+            .on_click(cx.listener(|view, index, _, cx| {
+                view.tab = *index;
+                cx.notify();
+            }));
+        let detail = match self.tab {
+            1 => TextView::new(&self.input)
+                .scrollable(true)
+                .size_full()
+                .into_any_element(),
+            2 => TextView::new(&self.output)
+                .scrollable(true)
+                .size_full()
+                .into_any_element(),
+            3 => TextView::new(&self.failure)
+                .scrollable(true)
+                .size_full()
+                .into_any_element(),
+            _ => DataTable::new(&self.step_table).into_any_element(),
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_4()
             .child(
-                TableHeader::new().child(
-                    TableRow::new()
-                        .child(TableHead::new().child("Run"))
-                        .child(TableHead::new().child("Result")),
-                ),
-            )
-            .child(body)
-    }
-
-    fn steps_table(&self, started_ms: i64) -> Table {
-        let mut body = TableBody::new();
-        for step in &self.steps {
-            body = body.child(
-                TableRow::new()
-                    .child(TableCell::new().child(step.kind.clone()))
-                    .child(TableCell::new().child(step.name.clone()))
-                    .child(TableCell::new().child(format!(
-                        "+{} ms",
-                        step.started_ms.saturating_sub(started_ms)
-                    )))
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child("Sofia Trace")
+                    .child(if self.error.is_empty() {
+                        format!("{} runs", self.runs.len())
+                    } else {
+                        self.error.clone()
+                    })
                     .child(
-                        TableCell::new().child(
-                            step.duration_ms
-                                .map(|value| format!("{value} ms"))
-                                .unwrap_or_default(),
-                        ),
-                    )
-                    .child(TableCell::new().child(summary(&step.detail, 96))),
-            );
-        }
-        Table::new()
-            .small()
-            .accessibility_label("Selected run timeline")
-            .child(
-                TableHeader::new().child(
-                    TableRow::new()
-                        .child(TableHead::new().child("Event"))
-                        .child(TableHead::new().child("Name"))
-                        .child(TableHead::new().child("At"))
-                        .child(TableHead::new().child("Duration"))
-                        .child(TableHead::new().child("Detail")),
-                ),
+                        Button::new("latest")
+                            .icon(IconName::RefreshCw)
+                            .on_click(cx.listener(|view, _, _, cx| view.latest(cx))),
+                    ),
             )
-            .child(body)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .gap_3()
+                    .child(
+                        div()
+                            .w(relative(0.35))
+                            .min_w_0()
+                            .child(DataTable::new(&self.run_table)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(tabs)
+                            .child(div().flex_1().min_h_0().child(detail)),
+                    ),
+            )
     }
 }
 
@@ -202,91 +274,8 @@ fn summary(text: &str, max: usize) -> String {
         start
     }
 }
+
 fn duration(ms: Option<i64>) -> String {
     ms.map(|ms| format!("{:.1}s", ms as f64 / 1000.))
         .unwrap_or_else(|| "live".into())
-}
-
-impl Render for TraceView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected = self
-            .runs
-            .iter()
-            .find(|run| self.selected.as_ref() == Some(&run.id));
-        let started_ms = selected.map(|run| run.started_ms).unwrap_or_default();
-        let (input, output, error) = selected
-            .map(|run| (run.input.clone(), run.output.clone(), run.error.clone()))
-            .unwrap_or_default();
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .p_5()
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .child(
-                div()
-                    .text_xl()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("Sofia Trace"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(if self.error.is_empty() {
-                        format!("{} recent runs · updates live", self.runs.len())
-                    } else {
-                        self.error.clone()
-                    }),
-            )
-            .child(
-                Button::new("latest-run")
-                    .label("Latest run")
-                    .on_click(cx.listener(|view, _, _, cx| view.latest(cx))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .gap_4()
-                    .child(
-                        div()
-                            .w(relative(0.35))
-                            .min_w_0()
-                            .overflow_y_scrollbar()
-                            .child(self.runs_table(cx)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .overflow_y_scrollbar()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .child(div().text_lg().child("Timeline"))
-                            .child(self.steps_table(started_ms))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Input"),
-                            )
-                            .child(div().text_sm().child(input))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child("Sofia"),
-                            )
-                            .child(div().text_sm().child(output))
-                            .when(!error.is_empty(), |this| {
-                                this.child(div().text_color(cx.theme().danger).child(error))
-                            }),
-                    ),
-            )
-    }
 }

@@ -19,7 +19,7 @@ fn main() {
                 cx,
                 |window, cx| {
                     sofia_ui_layer::theme::observe(window, cx);
-                    cx.new(TraceView::new)
+                    cx.new(|cx| TraceView::new(window, cx))
                 },
             )
             .expect("open Sofia Trace");
