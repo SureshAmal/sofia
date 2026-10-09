@@ -35,7 +35,9 @@ mod tests {
 
     #[test]
     fn test_mermaid_diagram_renders_to_svg() {
-        use merman::svg::{HostTheme, HostThemePreset, Presentation, PresentationProfile, SvgPipeline};
+        use merman::svg::{
+            HostTheme, HostThemePreset, Presentation, PresentationProfile, SvgPipeline,
+        };
         use merman::{OperationControl, RenderOutput, RenderRequest, Renderer, SvgRequest};
 
         let diagram = "graph TD;\n    A-->B;\n    A-->C;\n    B-->D;\n    C-->D;";
@@ -43,7 +45,8 @@ mod tests {
             .with_profile(PresentationProfile::MermanModern)
             .with_theme(HostTheme::from_preset(HostThemePreset::OneDark));
         let resolved = presentation.resolve();
-        let renderer = Renderer::new().with_engine(resolved.materialize_engine(merman::Engine::new()));
+        let renderer =
+            Renderer::new().with_engine(resolved.materialize_engine(merman::Engine::new()));
 
         let request = SvgRequest {
             pipeline: Some(SvgPipeline::resvg_safe()),
@@ -51,13 +54,21 @@ mod tests {
             ..Default::default()
         };
 
-        let output = renderer.render(RenderRequest::svg(diagram, OperationControl::new(), request))
+        let output = renderer
+            .render(RenderRequest::svg(
+                diagram,
+                OperationControl::new(),
+                request,
+            ))
             .expect("Mermaid rendering should succeed");
         let svg = match output {
             RenderOutput::Svg(Some(out)) => out.svg().to_string(),
             _ => panic!("Expected SVG output"),
         };
-        assert!(svg.contains("<svg"), "Rendered output should contain <svg tag");
+        assert!(
+            svg.contains("<svg"),
+            "Rendered output should contain <svg tag"
+        );
 
         let mut opt = usvg::Options::default();
         let mut fontdb = usvg::fontdb::Database::new();
@@ -65,15 +76,22 @@ mod tests {
         opt.fontdb = std::sync::Arc::new(fontdb);
         let rtree = usvg::Tree::from_str(&svg, &opt).unwrap();
         let pixmap_size = rtree.size().to_int_size();
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(pixmap_size.width(), pixmap_size.height()).unwrap();
-        resvg::render(&rtree, resvg::tiny_skia::Transform::default(), &mut pixmap.as_mut());
+        let mut pixmap =
+            resvg::tiny_skia::Pixmap::new(pixmap_size.width(), pixmap_size.height()).unwrap();
+        resvg::render(
+            &rtree,
+            resvg::tiny_skia::Transform::default(),
+            &mut pixmap.as_mut(),
+        );
         let png = pixmap.encode_png().unwrap();
         assert!(!png.is_empty());
     }
 
     #[test]
     fn test_merman_render() {
-        use merman::svg::{HostTheme, HostThemePreset, Presentation, PresentationProfile, SvgPipeline};
+        use merman::svg::{
+            HostTheme, HostThemePreset, Presentation, PresentationProfile, SvgPipeline,
+        };
         use merman::{OperationControl, RenderOutput, RenderRequest, Renderer, SvgRequest};
 
         let diagram = r#"
@@ -93,13 +111,19 @@ flowchart TD
             .with_profile(PresentationProfile::MermanModern)
             .with_theme(HostTheme::from_preset(HostThemePreset::OneDark));
         let resolved = presentation.resolve();
-        let renderer = Renderer::new().with_engine(resolved.materialize_engine(merman::Engine::new()));
+        let renderer =
+            Renderer::new().with_engine(resolved.materialize_engine(merman::Engine::new()));
         let request = SvgRequest {
             pipeline: Some(SvgPipeline::resvg_safe()),
             presentation: resolved.render_policy(),
             ..Default::default()
         };
-        let output = renderer.render(RenderRequest::svg(diagram, OperationControl::new(), request))
+        let output = renderer
+            .render(RenderRequest::svg(
+                diagram,
+                OperationControl::new(),
+                request,
+            ))
             .expect("merman render failed");
         if let RenderOutput::Svg(Some(svg_output)) = output {
             let svg = svg_output.svg();

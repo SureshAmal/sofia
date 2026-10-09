@@ -94,6 +94,7 @@ async fn streamable_http_sends_bearer_and_calls_tool() {
         transport: McpTransport::Http {
             url: format!("http://127.0.0.1:{port}/mcp"),
             bearer_token: "fixture-token".into(),
+            oauth: None,
         },
         disabled_tools: vec![],
     };

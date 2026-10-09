@@ -203,14 +203,21 @@ impl AudioPlayback {
                 .find(|device| device.id().ok().as_ref() == Some(&requested))
                 .ok_or_else(|| format!("output device is unavailable: {device_id}"))?
         } else {
-            #[cfg(target_os = "linux")]
-            let desktop = host.output_devices().ok().and_then(|mut devices| {
-                devices.find(|device| device.id().is_ok_and(|id| id.1 == "pipewire"))
-            });
-            #[cfg(not(target_os = "linux"))]
-            let desktop = None;
-            desktop
-                .or_else(|| host.default_output_device())
+            // The host default is the user-selected sink. Picking the first
+            // PipeWire device can select a monitor or a stale Bluetooth node.
+            host.default_output_device()
+                .or_else(|| {
+                    #[cfg(target_os = "linux")]
+                    {
+                        host.output_devices().ok().and_then(|mut devices| {
+                            devices.find(|device| device.id().is_ok_and(|id| id.1 == "pipewire"))
+                        })
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        None
+                    }
+                })
                 .ok_or("No default audio output")?
         };
         tracing::info!(device = ?output.id().ok(), "opening speaker");
@@ -270,6 +277,10 @@ impl AudioPlayback {
             remaining,
             queued: self.queued_samples.clone(),
         });
+        // `Player::clear` pauses Rodio's player. Tool calls, interruptions,
+        // mute, and stop-listening all clear queued speech, so every new
+        // model-audio chunk must explicitly resume playback.
+        self.player.play();
         Ok(())
     }
 

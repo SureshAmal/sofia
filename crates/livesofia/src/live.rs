@@ -264,10 +264,11 @@ async fn handle_session(
     commands: &mut mpsc::Receiver<LiveCommand>,
     mcp: std::sync::Arc<sofia_mcp_client::McpBridge>,
 ) {
-    let mut tool_tasks: tokio::task::JoinSet<(String, String, serde_json::Value)> =
+    let mut tool_tasks: tokio::task::JoinSet<(String, String, sofia_mcp_client::ToolOutput)> =
         tokio::task::JoinSet::new();
     let mut pending_tools = std::collections::HashMap::<String, tokio::task::AbortHandle>::new();
     let mut completed_tool_responses = Vec::<FunctionResponse>::new();
+    let mut completed_tool_images = Vec::<sofia_mcp_client::ToolImage>::new();
     let mut transcript = AssistantTranscript::new();
     let mut busy = false;
     let mut paused = false;
@@ -305,9 +306,11 @@ async fn handle_session(
     loop {
         tokio::select! {
             Some(result) = tool_tasks.join_next(), if !tool_tasks.is_empty() => {
-                if let Ok((id, name, response)) = result {
+                if let Ok((id, name, output)) = result {
                     pending_tools.remove(&id);
                     if paused { continue; }
+                    let response = output.response;
+                    completed_tool_images.extend(output.images);
                     let success = response.get("isError").and_then(serde_json::Value::as_bool) != Some(true);
                     hub.publish(ServerEvent::ToolCallFinished { call_id: id.clone(), name: name.clone(), success });
                     if !success {
@@ -323,6 +326,14 @@ async fn handle_session(
                     // separate spoken answer for every completed call.
                     completed_tool_responses.push(FunctionResponse { id, name, response });
                     if pending_tools.is_empty() {
+                        for image in std::mem::take(&mut completed_tool_images) {
+                            if let Err(error) = session.send_video(&image.bytes, &image.mime_type).await {
+                                warn!(%error, "MCP image could not be sent to Gemini");
+                                hub.publish(ServerEvent::Error {
+                                    message: format!("MCP image could not be sent to Gemini: {error}"),
+                                });
+                            }
+                        }
                         let responses = std::mem::take(&mut completed_tool_responses);
                         if let Err(error) = session.send_tool_response(responses).await {
                             warn!(%error,"MCP result could not be sent to Gemini");
@@ -331,6 +342,11 @@ async fn handle_session(
                         tool_audio_suppressed = false;
                         hub.set_state(TurnState::Thinking, Some(session_id));
                     }
+                } else if pending_tools.is_empty() {
+                    // A cancelled or failed task must not leave all later
+                    // model audio suppressed for the rest of the session.
+                    tool_audio_suppressed = false;
+                    hub.set_state(TurnState::Thinking, Some(session_id));
                 }
             }
             _ = audio_health.tick() => {
@@ -530,16 +546,12 @@ async fn handle_session(
                                     Ok(player) => playback = Some(player),
                                     Err(error) => {
                                         hub.publish(ServerEvent::Error { message: format!("Speaker could not open: {error}") });
-                                        speaker_muted = true;
-                                        hub.set_speaker_muted(true);
                                     }
                                 }
                             }
                             if let Some(player) = playback.as_ref()
                                 && let Err(error) = player.push_pcm(&bytes) {
                                     hub.publish(ServerEvent::Error { message: format!("Speaker playback failed: {error}") });
-                                    speaker_muted = true;
-                                    hub.set_speaker_muted(true);
                                     playback = None;
                             }
                         }
@@ -565,7 +577,7 @@ async fn handle_session(
                             let bridge = mcp.clone();
                             let id = call.id.clone();
                             let task = tool_tasks.spawn(async move {
-                                let response = bridge.call(&call.name,call.args).await;
+                                let response = bridge.call_with_media(&call.name,call.args).await;
                                 (call.id,call.name,response)
                             });
                             pending_tools.insert(id,task);
@@ -573,7 +585,14 @@ async fn handle_session(
                         hub.set_state(TurnState::ToolRunning, Some(session_id));
                     }
                     GeminiEvent::ToolCallCancellation(ids) => {
-                        for id in ids { if let Some(task) = pending_tools.remove(&id) { task.abort(); } }
+                        for id in ids {
+                            if let Some(task) = pending_tools.remove(&id) {
+                                task.abort();
+                            }
+                        }
+                        if pending_tools.is_empty() {
+                            tool_audio_suppressed = false;
+                        }
                     }
                     GeminiEvent::TurnComplete | GeminiEvent::Interrupted => {
                         if matches!(event, GeminiEvent::Interrupted)

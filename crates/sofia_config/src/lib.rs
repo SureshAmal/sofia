@@ -70,6 +70,31 @@ pub fn save_appearance(appearance: &AppearanceSettings) -> Result<(), String> {
     write_root(&path, &root)
 }
 
+pub fn upsert_mcp_server(server: &McpServerConfig) -> Result<(), String> {
+    server.validate()?;
+    let path = settings_path()?;
+    let mut settings = load_at(&path)?;
+    if let Some(existing) = settings
+        .mcp_servers
+        .iter_mut()
+        .find(|existing| existing.id == server.id)
+    {
+        *existing = server.clone();
+    } else {
+        settings.mcp_servers.push(server.clone());
+    }
+    settings.validate()?;
+    let mut root = read_root(&path)?.unwrap_or_else(|| Value::Object(Map::new()));
+    let object = root
+        .as_object_mut()
+        .ok_or("settings root must be a JSON object")?;
+    object.insert(
+        "mcp_servers".into(),
+        serde_json::to_value(settings.mcp_servers).map_err(|error| error.to_string())?,
+    );
+    write_root(&path, &root)
+}
+
 fn merge(target: &mut Value, patch: Value) {
     if let (Some(object), Value::Object(patch)) = (target.as_object_mut(), &patch) {
         for (key, value) in patch {

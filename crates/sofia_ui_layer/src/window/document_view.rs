@@ -57,9 +57,7 @@ fn strip_foreign_objects(svg: &mut String) {
     }
 }
 
-fn build_host_theme(
-    theme: &gpui_kit::component::Theme,
-) -> merman::svg::HostTheme {
+fn build_host_theme(theme: &gpui_kit::component::Theme) -> merman::svg::HostTheme {
     use merman::svg::{HostTheme, HostThemeAppearance, ThemeRole};
 
     let appearance = if theme.mode.is_dark() {
@@ -77,21 +75,96 @@ fn build_host_theme(
         host = updated;
     }
 
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::Canvas, hsla_to_hex(theme.background)) { host = h; }
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::Surface, hsla_to_hex(theme.popover)) { host = h; }
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::SurfaceAlt, hsla_to_hex(theme.muted)) { host = h; }
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::SurfaceMuted, hsla_to_hex(theme.secondary)) { host = h; }
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::Text, hsla_to_hex(theme.foreground)) { host = h; }
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::SubtleText, hsla_to_hex(theme.muted_foreground)) { host = h; }
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::Border, hsla_to_hex(theme.border)) { host = h; }
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::Line, hsla_to_hex(theme.primary)) { host = h; }
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::ClusterBackground, hsla_to_hex(theme.popover)) { host = h; }
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::ClusterBorder, hsla_to_hex(theme.border)) { host = h; }
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::EdgeLabelBackground, hsla_to_hex(theme.background)) { host = h; }
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::ActorBackground, hsla_to_hex(theme.popover)) { host = h; }
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::ActorBorder, hsla_to_hex(theme.border)) { host = h; }
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::ActorText, hsla_to_hex(theme.foreground)) { host = h; }
-    if let Ok(h) = host.clone().try_with_role(ThemeRole::Error, hsla_to_hex(theme.red)) { host = h; }
+    if let Ok(h) = host
+        .clone()
+        .try_with_role(ThemeRole::Canvas, hsla_to_hex(theme.background))
+    {
+        host = h;
+    }
+    if let Ok(h) = host
+        .clone()
+        .try_with_role(ThemeRole::Surface, hsla_to_hex(theme.popover))
+    {
+        host = h;
+    }
+    if let Ok(h) = host
+        .clone()
+        .try_with_role(ThemeRole::SurfaceAlt, hsla_to_hex(theme.muted))
+    {
+        host = h;
+    }
+    if let Ok(h) = host
+        .clone()
+        .try_with_role(ThemeRole::SurfaceMuted, hsla_to_hex(theme.secondary))
+    {
+        host = h;
+    }
+    if let Ok(h) = host
+        .clone()
+        .try_with_role(ThemeRole::Text, hsla_to_hex(theme.foreground))
+    {
+        host = h;
+    }
+    if let Ok(h) = host
+        .clone()
+        .try_with_role(ThemeRole::SubtleText, hsla_to_hex(theme.muted_foreground))
+    {
+        host = h;
+    }
+    if let Ok(h) = host
+        .clone()
+        .try_with_role(ThemeRole::Border, hsla_to_hex(theme.border))
+    {
+        host = h;
+    }
+    if let Ok(h) = host
+        .clone()
+        .try_with_role(ThemeRole::Line, hsla_to_hex(theme.primary))
+    {
+        host = h;
+    }
+    if let Ok(h) = host
+        .clone()
+        .try_with_role(ThemeRole::ClusterBackground, hsla_to_hex(theme.popover))
+    {
+        host = h;
+    }
+    if let Ok(h) = host
+        .clone()
+        .try_with_role(ThemeRole::ClusterBorder, hsla_to_hex(theme.border))
+    {
+        host = h;
+    }
+    if let Ok(h) = host.clone().try_with_role(
+        ThemeRole::EdgeLabelBackground,
+        hsla_to_hex(theme.background),
+    ) {
+        host = h;
+    }
+    if let Ok(h) = host
+        .clone()
+        .try_with_role(ThemeRole::ActorBackground, hsla_to_hex(theme.popover))
+    {
+        host = h;
+    }
+    if let Ok(h) = host
+        .clone()
+        .try_with_role(ThemeRole::ActorBorder, hsla_to_hex(theme.border))
+    {
+        host = h;
+    }
+    if let Ok(h) = host
+        .clone()
+        .try_with_role(ThemeRole::ActorText, hsla_to_hex(theme.foreground))
+    {
+        host = h;
+    }
+    if let Ok(h) = host
+        .clone()
+        .try_with_role(ThemeRole::Error, hsla_to_hex(theme.red))
+    {
+        host = h;
+    }
 
     let series = [
         hsla_to_hex(theme.primary),
@@ -101,7 +174,9 @@ fn build_host_theme(
         hsla_to_hex(theme.magenta),
         hsla_to_hex(theme.cyan),
     ];
-    if let Ok(h) = host.clone().try_with_series_palette(series) { host = h; }
+    if let Ok(h) = host.clone().try_with_series_palette(series) {
+        host = h;
+    }
     host
 }
 
@@ -263,10 +338,7 @@ impl DocumentView {
         };
         let dx = cursor.0 - start_x;
         let dy = cursor.1 - start_y;
-        self.drag_offset = (
-            self.drag_start_offset.0 + dx,
-            self.drag_start_offset.1 + dy,
-        );
+        self.drag_offset = (self.drag_start_offset.0 + dx, self.drag_start_offset.1 + dy);
         cx.notify();
     }
 
@@ -432,19 +504,27 @@ impl DocumentView {
                 MouseButton::Left,
                 cx.listener(|view, event: &MouseDownEvent, window, cx| {
                     gpui_kit::base::GlobalState::suppress_text_selection(cx);
-                    view.on_drag_start((f32::from(event.position.x), f32::from(event.position.y)), window);
+                    view.on_drag_start(
+                        (f32::from(event.position.x), f32::from(event.position.y)),
+                        window,
+                    );
                 }),
             )
             .on_drag(WindowDrag(cx.entity_id()), |drag, _, _, cx| {
                 cx.stop_propagation();
                 cx.new(|_| drag.clone())
             })
-            .on_drag_move(cx.listener(|view, event: &DragMoveEvent<WindowDrag>, _, cx| {
-                if event.drag(cx).0 == cx.entity_id() {
-                    let cursor = (f32::from(event.event.position.x), f32::from(event.event.position.y));
-                    view.on_drag_move_event(cursor, cx);
-                }
-            }))
+            .on_drag_move(
+                cx.listener(|view, event: &DragMoveEvent<WindowDrag>, _, cx| {
+                    if event.drag(cx).0 == cx.entity_id() {
+                        let cursor = (
+                            f32::from(event.event.position.x),
+                            f32::from(event.event.position.y),
+                        );
+                        view.on_drag_move_event(cursor, cx);
+                    }
+                }),
+            )
             .child(
                 Icon::new(kind_icon)
                     .size(px(15.0))
@@ -530,7 +610,8 @@ impl DocumentView {
             .with_profile(PresentationProfile::MermanModern)
             .with_theme(host_theme);
         let resolved = presentation.resolve();
-        let renderer = Renderer::new().with_engine(resolved.materialize_engine(merman::Engine::new()));
+        let renderer =
+            Renderer::new().with_engine(resolved.materialize_engine(merman::Engine::new()));
 
         let request = SvgRequest {
             pipeline: Some(SvgPipeline::resvg_safe()),
@@ -542,16 +623,15 @@ impl DocumentView {
             ..Default::default()
         };
 
-        let mut svg_str = match renderer.render(RenderRequest::svg(
-            code,
-            OperationControl::new(),
-            request,
-        )) {
-            Ok(RenderOutput::Svg(Some(output))) => output.svg().to_string(),
-            Ok(RenderOutput::Svg(None)) => return Err("Mermaid produced no SVG output".to_string()),
-            Ok(_) => return Err("Mermaid produced non-SVG output".to_string()),
-            Err(e) => return Err(format!("Mermaid render failed: {e}")),
-        };
+        let mut svg_str =
+            match renderer.render(RenderRequest::svg(code, OperationControl::new(), request)) {
+                Ok(RenderOutput::Svg(Some(output))) => output.svg().to_string(),
+                Ok(RenderOutput::Svg(None)) => {
+                    return Err("Mermaid produced no SVG output".to_string());
+                }
+                Ok(_) => return Err("Mermaid produced non-SVG output".to_string()),
+                Err(e) => return Err(format!("Mermaid render failed: {e}")),
+            };
 
         strip_foreign_objects(&mut svg_str);
 
@@ -570,8 +650,8 @@ impl DocumentView {
 
         let mut opt = usvg::Options::default();
         opt.fontdb = fontdb.clone();
-        let rtree = usvg::Tree::from_str(&svg_str, &opt)
-            .map_err(|e| format!("SVG parse error: {e}"))?;
+        let rtree =
+            usvg::Tree::from_str(&svg_str, &opt).map_err(|e| format!("SVG parse error: {e}"))?;
 
         let size = rtree.size();
         let width = size.width();
@@ -619,7 +699,8 @@ impl DocumentView {
                         if let Some(block) = node.data::<MermaidBlock>() {
                             let mut guard = block.rendered.lock().unwrap();
                             if guard.is_none() {
-                                *guard = Self::render_mermaid_svg(&block.code, cx.theme(), &fontdb).ok();
+                                *guard =
+                                    Self::render_mermaid_svg(&block.code, cx.theme(), &fontdb).ok();
                             }
 
                             if let Some((png, width, height)) = guard.as_ref() {
@@ -940,15 +1021,20 @@ impl Render for DocumentView {
                 cx.stop_propagation();
                 cx.new(|_| drag.clone())
             })
-            .on_drag_move(cx.listener(|view, event: &DragMoveEvent<WindowResize>, window, cx| {
-                if event.drag(cx).0 == cx.entity_id() {
-                    view.on_resize_move(
-                        (f32::from(event.event.position.x), f32::from(event.event.position.y)),
-                        window,
-                        cx,
-                    );
-                }
-            }));
+            .on_drag_move(
+                cx.listener(|view, event: &DragMoveEvent<WindowResize>, window, cx| {
+                    if event.drag(cx).0 == cx.entity_id() {
+                        view.on_resize_move(
+                            (
+                                f32::from(event.event.position.x),
+                                f32::from(event.event.position.y),
+                            ),
+                            window,
+                            cx,
+                        );
+                    }
+                }),
+            );
 
         root.child(footer)
             .child(resize_handle)

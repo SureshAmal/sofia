@@ -14,7 +14,7 @@ async fn documents_roundtrip_through_real_mcp_client() {
     });
     let client = ().serve(client_io).await.unwrap();
     let server = server.await.unwrap();
-    assert_eq!(client.list_all_tools().await.unwrap().len(), 9);
+    assert_eq!(client.list_all_tools().await.unwrap().len(), 14);
     let created=client.call_tool(CallToolRequestParams::new("sofia_create_document").with_arguments(json!({"title":"Test note","content":{"kind":"note","markdown":"Hello **world**"},"open":false}).as_object().unwrap().clone())).await.unwrap();
     let result = created;
     let encoded = serde_json::to_value(result).unwrap();
@@ -124,8 +124,16 @@ async fn documents_roundtrip_through_real_mcp_client() {
         )
         .await
         .unwrap();
+    assert_ne!(open_res.is_error, Some(true));
+    let fetched_chart = client
+        .call_tool(
+            CallToolRequestParams::new("sofia_get_document")
+                .with_arguments(json!({"id": chart_id}).as_object().unwrap().clone()),
+        )
+        .await
+        .unwrap();
     let updated_chart: serde_json::Value = serde_json::from_str(
-        serde_json::to_value(open_res).unwrap()["content"][0]["text"]
+        serde_json::to_value(fetched_chart).unwrap()["content"][0]["text"]
             .as_str()
             .unwrap(),
     )

@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rmcp::model::Tool;
 use serde_json::{Value, json};
 use sofia_content::{Content, Store};
@@ -15,6 +16,34 @@ fn resolve(store: &Store, args: &Value) -> Result<sofia_content::Document, Strin
 }
 pub fn execute(store: &Store, name: &str, args: Value) -> Result<(Value, Option<String>), String> {
     let value = match name {
+        "sofia_clipboard_read" => match crate::clipboard::read()? {
+            crate::clipboard::ClipboardData::Text(text) => json!({"ok": true, "text": text}),
+            crate::clipboard::ClipboardData::Image { bytes, mime_type } => json!({
+                "ok": true,
+                "image": {"mime_type": mime_type, "data": STANDARD.encode(bytes)}
+            }),
+        },
+        "sofia_list_applications" => {
+            let query = optional(&args, "query");
+            json!({"ok": true, "applications": crate::apps::list(query)?})
+        }
+        "sofia_open_application" => {
+            let query = string(&args, "query")?;
+            let app = crate::apps::launch(&query)?;
+            json!({"ok": true, "opened": app})
+        }
+        "sofia_open_web" => {
+            let query = string(&args, "query")?;
+            let url = crate::web::open(&query)?;
+            json!({"ok": true, "url": url})
+        }
+        "sofia_screenshot" => {
+            let bytes = crate::screenshot::capture()?;
+            json!({
+                "ok": true,
+                "image": {"mime_type": "image/png", "data": STANDARD.encode(bytes)}
+            })
+        }
         "sofia_window_protocol" => {
             json!({
                 "version": 1,
@@ -273,6 +302,11 @@ pub fn declarations() -> Vec<Tool> {
         }
     });
     [
+        ("sofia_clipboard_read","Read the current Linux clipboard item and provide text or image content directly to the model",object(json!({}),vec![])),
+        ("sofia_list_applications","List installed Linux desktop applications, optionally filtered with fuzzy matching",object(json!({"query":{"type":"string","description":"Optional application name or desktop ID search"}}),vec![])),
+        ("sofia_open_application","Find and launch an installed Linux desktop application by fuzzy name or desktop ID",object(json!({"query":{"type":"string"}}),vec!["query"])),
+        ("sofia_open_web","Open a URL or DuckDuckGo query in the system browser. Bangs such as !yt rust are passed directly to DuckDuckGo.",object(json!({"query":{"type":"string"}}),vec!["query"])),
+        ("sofia_screenshot","Capture the current Wayland screen with grim and provide the PNG image directly to the model",object(json!({}),vec![])),
         ("sofia_window_protocol","Get supported content kinds, tags, chart types (line, bar, area, pie, radar), window placements, inline editing rules, and open/closed window tracking",object(json!({}),vec![])),
         ("sofia_create_document","Persist and optionally open notes, todos, reminders, charts (line, bar, area, pie, radar), or HTML. Opens by default.",object(create,vec!["title","content"])),
         ("sofia_list_documents","Search saved content by indexed text, kind or tag. Returns document summaries with open/closed status.",object(json!({"query":{"type":"string"},"kind":{"type":"string"},"tag":{"type":"string"}}),vec![])),

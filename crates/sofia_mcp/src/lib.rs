@@ -1,6 +1,10 @@
 //! Sofia's MCP server for persistent user content and presentation windows.
+mod apps;
+mod clipboard;
 mod notify;
+mod screenshot;
 mod tools;
+mod web;
 use rmcp::{ErrorData, RoleServer, ServerHandler, model::*, service::RequestContext};
 use serde_json::{Value, json};
 use sofia_content::Store;
@@ -56,7 +60,25 @@ impl ServerHandler for SofiaMcp {
                 Value::Object(request.arguments.unwrap_or_default()),
             )
             .await;
-        let content = vec![rmcp::model::ContentBlock::text(value.to_string())];
+        let image = value
+            .get("image")
+            .and_then(Value::as_object)
+            .and_then(|image| {
+                Some(rmcp::model::ContentBlock::image(
+                    image.get("data")?.as_str()?,
+                    image.get("mime_type")?.as_str()?,
+                ))
+            });
+        let content = if let Some(image) = image {
+            vec![
+                rmcp::model::ContentBlock::text(
+                    json!({"ok":true,"image_provided":true}).to_string(),
+                ),
+                image,
+            ]
+        } else {
+            vec![rmcp::model::ContentBlock::text(value.to_string())]
+        };
         Ok(if value.get("isError") == Some(&Value::Bool(true)) {
             CallToolResult::error(content)
         } else {

@@ -53,7 +53,19 @@ pub enum McpTransport {
         url: String,
         #[serde(default)]
         bearer_token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        oauth: Option<McpOAuth>,
     },
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpOAuth {
+    pub client_id: String,
+    pub client_secret: String,
+    pub scopes: Vec<String>,
+    pub token: Option<serde_json::Value>,
+    pub token_received_at: Option<u64>,
 }
 impl McpServerConfig {
     pub fn validate(&self) -> Result<(), String> {
@@ -78,6 +90,14 @@ impl McpServerConfig {
             {
                 Err(format!(
                     "MCP {}: use an http:// or https:// endpoint.",
+                    self.id
+                ))
+            }
+            McpTransport::Http {
+                oauth: Some(oauth), ..
+            } if oauth.client_id.trim().is_empty() || oauth.client_secret.trim().is_empty() => {
+                Err(format!(
+                    "MCP {}: OAuth client ID and client secret are required.",
                     self.id
                 ))
             }

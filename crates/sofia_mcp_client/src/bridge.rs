@@ -1,6 +1,7 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use gemini_live::types::FunctionDeclaration;
 use rmcp::{
-    RoleClient, ServiceExt,
+    ClientLifecycleMode, ClientServiceExt, RoleClient,
     model::CallToolRequestParams,
     service::RunningService,
     transport::{
@@ -14,22 +15,62 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 pub struct ConnectedServer {
     pub tools: Vec<rmcp::model::Tool>,
-    service: RunningService<RoleClient, ()>,
+    service: RunningService<RoleClient, rmcp::model::InitializeRequestParams>,
 }
+
+#[derive(Debug)]
+pub struct ToolImage {
+    pub bytes: Vec<u8>,
+    pub mime_type: String,
+}
+
+#[derive(Debug)]
+pub struct ToolOutput {
+    pub response: Value,
+    pub images: Vec<ToolImage>,
+}
+
 impl ConnectedServer {
     pub async fn connect(config: &McpServerConfig) -> Result<Self, String> {
         config.validate()?;
         tokio::time::timeout(Duration::from_secs(15), async {
+            let mut client_config = rmcp::model::InitializeRequestParams::new(
+                rmcp::model::ClientCapabilities::default(),
+                rmcp::model::Implementation::new("sofia", env!("CARGO_PKG_VERSION")),
+            );
+            client_config.protocol_version = rmcp::model::ProtocolVersion::V_2024_11_05;
             let service = match &config.transport {
                 McpTransport::Stdio { command, args, env } => {
                     let mut cmd = tokio::process::Command::new(command);
                     cmd.args(args).envs(env);
-                    ().serve(
-                        TokioChildProcess::new(cmd).map_err(|_| "MCP process could not start")?,
-                    )
-                    .await
+                    client_config
+                        .clone()
+                        .serve_with_lifecycle(
+                            TokioChildProcess::new(cmd).map_err(|_| "MCP process could not start")?,
+                            ClientLifecycleMode::Initialize,
+                        )
+                        .await
                 }
-                McpTransport::Http { url, bearer_token } => {
+                McpTransport::Http {
+                    url,
+                    oauth: Some(oauth),
+                    ..
+                } => {
+                    let client = crate::oauth::client(url, oauth).await?;
+                    let mut transport_config = StreamableHttpClientTransportConfig::default();
+                    transport_config.uri = url.clone().into();
+                    let transport =
+                        StreamableHttpClientTransport::with_client(client, transport_config);
+                    client_config
+                        .clone()
+                        .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
+                        .await
+                }
+                McpTransport::Http {
+                    url,
+                    bearer_token,
+                    oauth: None,
+                } => {
                     let client = reqwest::Client::builder()
                         .redirect(reqwest::redirect::Policy::none())
                         .connect_timeout(Duration::from_secs(10))
@@ -41,10 +82,12 @@ impl ConnectedServer {
                         (!bearer_token.trim().is_empty()).then(|| bearer_token.clone());
                     let transport =
                         StreamableHttpClientTransport::with_client(client, transport_config);
-                    ().serve(transport).await
+                    client_config
+                        .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
+                        .await
                 }
             }
-            .map_err(|_| "MCP handshake failed; check the server and credentials")?;
+            .map_err(|error| format!("MCP handshake failed: {error}"))?;
             let tools = service
                 .list_all_tools()
                 .await
@@ -54,7 +97,7 @@ impl ConnectedServer {
         .await
         .map_err(|_| "MCP connection/discovery timed out after 15 seconds".to_string())?
     }
-    pub async fn call(&self, name: String, args: Value) -> Result<Value, String> {
+    pub async fn call(&self, name: String, args: Value) -> Result<ToolOutput, String> {
         let args = args
             .as_object()
             .cloned()
@@ -67,8 +110,31 @@ impl ConnectedServer {
         .await
         .map_err(|_| "MCP tool timed out after 60 seconds")?
         .map_err(|_| "MCP tool request failed; execution outcome may be unknown")?;
-        let result = serde_json::to_value(result).map_err(|_| "MCP result could not be encoded")?;
-        if serde_json::to_vec(&result)
+        let images = result
+            .content
+            .iter()
+            .filter_map(|content| content.as_image())
+            .map(|image| {
+                let bytes = STANDARD
+                    .decode(&image.data)
+                    .map_err(|_| "MCP returned invalid base64 image data")?;
+                if bytes.len() > 20 * 1024 * 1024 {
+                    return Err("MCP image exceeds the 20 MiB model input limit".into());
+                }
+                Ok(ToolImage {
+                    bytes,
+                    mime_type: image.mime_type.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut response =
+            serde_json::to_value(result).map_err(|_| "MCP result could not be encoded")?;
+        if !images.is_empty()
+            && let Some(content) = response.get_mut("content").and_then(Value::as_array_mut)
+        {
+            content.retain(|block| block.get("type").and_then(Value::as_str) != Some("image"));
+        }
+        if serde_json::to_vec(&response)
             .map_err(|_| "Invalid MCP result")?
             .len()
             > 128 * 1024
@@ -77,7 +143,7 @@ impl ConnectedServer {
                 "Tool completed, but its result exceeds the 128 KiB model response limit".into(),
             );
         }
-        Ok(result)
+        Ok(ToolOutput { response, images })
     }
 }
 
@@ -173,6 +239,10 @@ impl McpBridge {
         self.declarations.clone()
     }
     pub async fn call(&self, name: &str, args: Value) -> Value {
+        self.call_with_media(name, args).await.response
+    }
+
+    pub async fn call_with_media(&self, name: &str, args: Value) -> ToolOutput {
         let binding = self.bindings.get(name).or_else(|| {
             self.aliases
                 .get(name)
@@ -182,7 +252,10 @@ impl McpBridge {
             Some(binding) => binding.server.call(binding.original.clone(), args).await,
             None => Err("Unknown or disabled MCP tool".into()),
         };
-        result.unwrap_or_else(|error| json!({"isError":true,"error":error}))
+        result.unwrap_or_else(|error| ToolOutput {
+            response: json!({"isError":true,"error":error}),
+            images: Vec::new(),
+        })
     }
 }
 

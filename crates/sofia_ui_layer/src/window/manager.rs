@@ -36,6 +36,7 @@ pub struct WindowManager {
     commands: mpsc::Sender<Command>,
     updates: mpsc::Receiver<Update>,
     pending: Vec<Update>,
+    html_opened: HashSet<String>,
 }
 
 impl WindowManager {
@@ -89,6 +90,7 @@ impl WindowManager {
             commands,
             updates,
             pending: vec![],
+            html_opened: HashSet::new(),
         }
     }
 
@@ -118,12 +120,23 @@ impl WindowManager {
             match update {
                 Update::Documents(docs) => {
                     let ids: HashSet<_> = docs.iter().map(|doc| doc.id.clone()).collect();
+                    self.html_opened.retain(|id| ids.contains(id));
                     for panel in &mut self.panels {
                         if !ids.contains(&panel.view.read(cx).doc.id) && panel.closing.is_none() {
                             panel.closing = Some(Instant::now());
                         }
                     }
                     for doc in docs {
+                        if let sofia_content::Content::Html { html } = &doc.content {
+                            if doc.open && self.html_opened.insert(doc.id.clone()) {
+                                let path =
+                                    std::env::temp_dir().join(format!("sofia-{}.html", doc.id));
+                                if std::fs::write(&path, html).is_ok() {
+                                    let _ = open::that(&path);
+                                }
+                            }
+                            continue;
+                        }
                         if let Some(panel) = self
                             .panels
                             .iter_mut()
