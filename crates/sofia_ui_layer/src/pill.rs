@@ -46,12 +46,17 @@ impl PillView {
     pub fn new(cx: &mut Context<Self>, fullscreen: bool) -> Self {
         let (ipc, receiver) = IpcClient::start();
         cx.spawn(async move |this, cx| {
+            let mut delay_ms = 16;
             loop {
                 cx.background_executor()
-                    .timer(Duration::from_millis(16))
+                    .timer(Duration::from_millis(delay_ms))
                     .await;
-                if this.update(cx, |view, cx| view.tick(cx)).is_err() {
-                    break;
+                let step = this.update(cx, |view, cx| view.tick(cx));
+                match step {
+                    Ok(is_active) => {
+                        delay_ms = if is_active { 16 } else { 80 };
+                    }
+                    Err(_) => break,
                 }
             }
         })
@@ -83,7 +88,7 @@ impl PillView {
         }
     }
 
-    fn tick(&mut self, cx: &mut Context<Self>) {
+    fn tick(&mut self, cx: &mut Context<Self>) -> bool {
         let mut changed = self.documents.tick(cx);
         while let Ok(update) = self.receiver.try_recv() {
             changed = true;
@@ -153,7 +158,7 @@ impl PillView {
             }
         }
 
-        if (matches!(
+        let is_pulsing = (matches!(
             self.snapshot.state,
             TurnState::Connecting
                 | TurnState::Reconnecting
@@ -161,14 +166,26 @@ impl PillView {
                 | TurnState::ToolQueued
                 | TurnState::ToolRunning
         ) || !self.tools.is_empty())
-            && !cx.reduce_motion()
-        {
+            && !cx.reduce_motion();
+
+        if is_pulsing {
             self.phase += 0.10;
             changed = true;
         }
         if changed {
             cx.notify();
         }
+
+        // Active if any animation, sound bands, speech flow, or motion is ongoing
+        let has_audio = self.bands.iter().any(|b| *b > 0.001) || self.smooth_bands.iter().any(|b| *b > 0.001);
+        let in_drag = self.snap_x.is_some() || self.drag_offset.is_some();
+        let in_active_state = is_pulsing
+            || matches!(
+                self.snapshot.state,
+                TurnState::Listening | TurnState::Speaking
+            );
+
+        changed || has_audio || in_drag || in_active_state
     }
 
     fn apply_event(&mut self, event: ServerEvent) {

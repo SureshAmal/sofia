@@ -41,7 +41,35 @@ impl ConnectedServer {
             client_config.protocol_version = rmcp::model::ProtocolVersion::V_2024_11_05;
             let service = match &config.transport {
                 McpTransport::Stdio { command, args, env } => {
-                    let mut cmd = tokio::process::Command::new(command);
+                    #[cfg(windows)]
+                    let resolved_command = {
+                        let path = std::path::Path::new(command);
+                        if path.extension().is_none() {
+                            let extensions = ["cmd", "bat", "exe"];
+                            let mut found = None;
+                            if let Ok(paths) = std::env::var("PATH") {
+                                for dir in std::env::split_paths(&paths) {
+                                    for ext in &extensions {
+                                        let candidate = dir.join(command).with_extension(ext);
+                                        if candidate.is_file() {
+                                            found = Some(candidate.to_string_lossy().to_string());
+                                            break;
+                                        }
+                                    }
+                                    if found.is_some() {
+                                        break;
+                                    }
+                                }
+                            }
+                            found.unwrap_or_else(|| command.clone())
+                        } else {
+                            command.clone()
+                        }
+                    };
+                    #[cfg(not(windows))]
+                    let resolved_command = command.as_str();
+
+                    let mut cmd = tokio::process::Command::new(resolved_command);
                     cmd.args(args).envs(env);
                     client_config
                         .clone()
