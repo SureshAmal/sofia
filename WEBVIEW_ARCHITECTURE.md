@@ -10,7 +10,7 @@ and charts in the existing GPUI content window system.
 
 | Platform | Host | Browser engine | Window integration |
 | --- | --- | --- | --- |
-| Linux Wayland | A small Python GI helper process using GTK 3 and `gtk-layer-shell` | WebKitGTK 4.1 | One Wayland layer surface per open web document, positioned beside the pill |
+| Linux Wayland | A small `sofia-webview` helper process using GTK 3 and `gtk-layer-shell` | WebKitGTK 4.1 | One Wayland layer surface per open web document, positioned beside the pill |
 | Windows | A GPUI-owned content window with `gpui-wry` | WebView2 through Wry | Native child view inside the GPUI window |
 
 The Linux helper is necessary because Wry's child view cannot be embedded in
@@ -84,9 +84,11 @@ the user interacts with it and returns to the pill on close.
 
 ## Implementation order and acceptance
 
-1. Add a Linux helper using GTK 3, WebKitGTK 4.1, and `gtk-layer-shell`,
-   controlled by `sofia-ui-layer`. The initial implementation uses the
-   installed Python GI bindings, so it needs no compiled GTK bindings.
+1. Add a Linux `sofia-webview` crate with GTK 3, WebKitGTK 4.1, and
+   `gtk-layer-shell`, plus a small versioned IPC contract shared with
+   `sofia-ui-layer`. This Fedora system has GTK 3, WebKitGTK 4.1, and the
+   `gtk-layer-shell` runtime; `gtk-layer-shell-devel` is still required to
+   compile the bindings.
 2. Run an independent WebKitGTK layer-surface smoke test on the active
    Hyprland session: styled page, JavaScript click counter, CSS animation,
    text input, resize, opacity, and transparent background.
@@ -103,19 +105,3 @@ the user interacts with it and returns to the pill on close.
 This is a platform integration task. A GPUI HTML renderer or a screenshot of a
 browser would leave JavaScript interaction, selection, keyboard input, and
 animation incomplete.
-
-## Current implementation
-
-The first Linux host is in `crates/sofia_ui_layer/src/webview_host.py`, with a
-small Rust process controller in `webview.rs`. Sofia starts one helper for each
-open HTML document, sends complete HTML on revision changes and geometry on
-position changes, and closes the helper with the document. It keeps the GPUI
-panel's title and close control. WebKit renders the body after the GPUI morph
-opens. On this Hyprland desktop, a smoke page verified CSS layout, a CSS
-animation, JavaScript click behavior, revision reload, close, and exact
-layer-surface geometry. Windows integration, richer navigation policy, and
-browser failure reporting remain future work.
-
-The Linux runtime needs Python 3 with PyGObject introspection for GTK 3,
-WebKitGTK 4.1, and GtkLayerShell (on Fedora: `python3-gobject`,
-`webkit2gtk4.1`, and `gtk-layer-shell`).

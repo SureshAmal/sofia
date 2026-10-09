@@ -35,14 +35,8 @@ enum Update {
 struct Panel {
     view: Entity<DocumentView>,
     closing: Option<Instant>,
-    #[cfg(target_os = "linux")]
-    opened_at: Instant,
     generation: u64,
     _subscription: Option<Subscription>,
-    #[cfg(target_os = "linux")]
-    web: Option<crate::webview::WebHost>,
-    #[cfg(target_os = "linux")]
-    last_web_attempt: Option<Instant>,
 }
 
 static NEXT_PANEL_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -112,25 +106,8 @@ impl WindowManager {
         let _ = self.commands.send(Command::Refresh);
     }
 
-    pub fn tick(&mut self, cx: &App) -> bool {
+    pub fn tick(&mut self) -> bool {
         let mut changed = false;
-        #[cfg(target_os = "linux")]
-        {
-            for panel in &mut self.panels {
-                if panel.web.as_mut().is_some_and(|web| !web.alive()) {
-                    panel.web = None;
-                    changed = true;
-                }
-            }
-            changed |= self.panels.iter().any(|panel| {
-                panel.closing.is_none()
-                    && panel.web.is_none()
-                    && panel
-                        .last_web_attempt
-                        .is_none_or(|attempt| attempt.elapsed() >= Duration::from_secs(2))
-                    && matches!(panel.view.read(cx).doc.content, Content::Html { .. })
-            });
-        }
         while let Ok(update) = self.updates.try_recv() {
             self.pending.push(update);
             changed = true;
@@ -154,10 +131,6 @@ impl WindowManager {
                     for panel in &mut self.panels {
                         if !ids.contains(&panel.view.read(cx).doc.id) && panel.closing.is_none() {
                             panel.closing = Some(Instant::now());
-                            #[cfg(target_os = "linux")]
-                            {
-                                panel.web = None;
-                            }
                         }
                     }
                     for doc in docs {
@@ -179,14 +152,8 @@ impl WindowManager {
                             self.panels.push(Panel {
                                 view,
                                 closing: None,
-                                #[cfg(target_os = "linux")]
-                                opened_at: Instant::now(),
                                 generation: NEXT_PANEL_GENERATION.fetch_add(1, Ordering::Relaxed),
                                 _subscription: Some(subscription),
-                                #[cfg(target_os = "linux")]
-                                web: None,
-                                #[cfg(target_os = "linux")]
-                                last_web_attempt: None,
                             });
                         }
                     }
@@ -260,7 +227,7 @@ impl WindowManager {
     }
 
     pub fn render(
-        &mut self,
+        &self,
         pill: (f32, f32),
         pill_size: (f32, f32),
         viewport: (f32, f32),
@@ -268,7 +235,7 @@ impl WindowManager {
         cx: &App,
     ) -> Vec<AnyElement> {
         self.panels
-            .iter_mut()
+            .iter()
             .enumerate()
             .map(|(index, panel)| {
                 let view = panel.view.read(cx);
@@ -281,43 +248,11 @@ impl WindowManager {
                     viewport,
                     rem,
                 );
-                #[cfg(target_os = "linux")]
-                if let Content::Html { html } = &view.doc.content
-                    && panel.closing.is_none()
-                    && panel.opened_at.elapsed() >= Duration::from_millis(350)
-                {
-                    if panel.web.is_none()
-                        && panel
-                            .last_web_attempt
-                            .is_none_or(|attempt| attempt.elapsed() >= Duration::from_secs(2))
-                    {
-                        panel.last_web_attempt = Some(Instant::now());
-                        match crate::webview::WebHost::start() {
-                            Ok(web) => panel.web = Some(web),
-                            Err(error) => eprintln!("Sofia: {error}"),
-                        }
-                    }
-                    if let Some(web) = &mut panel.web {
-                        let x = f32::from(target.origin.x) + rem * 0.5;
-                        let y = f32::from(target.origin.y) + rem * 2.4;
-                        let width = f32::from(target.size.width) - rem;
-                        let height = f32::from(target.size.height) - rem * 3.8;
-                        let rect = (
-                            x as i32,
-                            y as i32,
-                            width.max(1.0) as i32,
-                            height.max(1.0) as i32,
-                        );
-                        if let Err(error) = web.show(view.doc.revision, html, rect) {
-                            eprintln!("Sofia: {error}");
-                            panel.web = None;
-                        }
-                    }
-                }
                 let closing = panel.closing.is_some();
                 let id = SharedString::from(format!(
                     "content-window-{}-{}",
-                    view.doc.id, panel.generation
+                    view.doc.id,
+                    panel.generation
                 ));
                 let view_entity = panel.view.clone();
                 let view_up = panel.view.clone();
@@ -790,24 +725,12 @@ impl Render for DocumentView {
         title_bar = title_bar.child(actions);
 
         let body = match &self.doc.content {
-            Content::Note { .. } => TextView::new(&self.text)
-                .selectable(true)
-                .scrollable(true)
-                .size_full()
-                .into_any_element(),
-            Content::Html { .. } => {
-                #[cfg(target_os = "linux")]
-                {
-                    div().flex_1().into_any_element()
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    TextView::new(&self.text)
-                        .selectable(true)
-                        .scrollable(true)
-                        .size_full()
-                        .into_any_element()
-                }
+            Content::Note { .. } | Content::Html { .. } => {
+                TextView::new(&self.text)
+                    .selectable(true)
+                    .scrollable(true)
+                    .size_full()
+                    .into_any_element()
             }
             Content::Todo { items } | Content::Reminder { items } => {
                 let mut list = div()
@@ -822,7 +745,10 @@ impl Render for DocumentView {
                     } else {
                         item.text.clone()
                     };
-                    let is_editing = self.editing_item.as_ref().is_some_and(|id| id == &item.id);
+                    let is_editing = self
+                        .editing_item
+                        .as_ref()
+                        .is_some_and(|id| id == &item.id);
 
                     if is_editing {
                         list = list.child(
@@ -836,21 +762,31 @@ impl Render for DocumentView {
                                 .child(
                                     Checkbox::new(SharedString::from(item.id.clone()))
                                         .checked(item.done)
-                                        .on_click(cx.listener(move |view, value: &bool, _, cx| {
-                                            view.todo_change(index, *value, cx)
+                                        .on_click(cx.listener(
+                                            move |view, value: &bool, _, cx| {
+                                                view.todo_change(index, *value, cx)
+                                            },
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .child(Input::new(&self.new_item).w_full()),
+                                )
+                                .child(
+                                    Button::new("save-item")
+                                        .label("Save")
+                                        .on_click(cx.listener(|view, _, window, cx| {
+                                            view.add_item(window, cx);
                                         })),
                                 )
-                                .child(div().flex_1().child(Input::new(&self.new_item).w_full()))
-                                .child(Button::new("save-item").label("Save").on_click(
-                                    cx.listener(|view, _, window, cx| {
-                                        view.add_item(window, cx);
-                                    }),
-                                ))
-                                .child(Button::new("cancel-item").label("Cancel").on_click(
-                                    cx.listener(|view, _, window, cx| {
-                                        view.cancel_edit(window, cx);
-                                    }),
-                                )),
+                                .child(
+                                    Button::new("cancel-item")
+                                        .label("Cancel")
+                                        .on_click(cx.listener(|view, _, window, cx| {
+                                            view.cancel_edit(window, cx);
+                                        })),
+                                ),
                         );
                     } else {
                         list = list.child(
@@ -864,9 +800,11 @@ impl Render for DocumentView {
                                 .child(
                                     Checkbox::new(SharedString::from(item.id.clone()))
                                         .checked(item.done)
-                                        .on_click(cx.listener(move |view, value: &bool, _, cx| {
-                                            view.todo_change(index, *value, cx)
-                                        })),
+                                        .on_click(cx.listener(
+                                            move |view, value: &bool, _, cx| {
+                                                view.todo_change(index, *value, cx)
+                                            },
+                                        )),
                                 )
                                 .child(
                                     div()
@@ -961,20 +899,16 @@ impl Render for DocumentView {
             .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _, cx| {
                 view.on_mouse_move(event, cx);
             }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|view, _, _, cx| {
-                    view.on_mouse_up(cx);
-                }),
-            )
+            .on_mouse_up(MouseButton::Left, cx.listener(|view, _, _, cx| {
+                view.on_mouse_up(cx);
+            }))
             .child(title_bar)
             .child(body);
 
         if matches!(
             self.doc.content,
             Content::Todo { .. } | Content::Reminder { .. }
-        ) && self.editing_item.is_none()
-        {
+        ) && self.editing_item.is_none() {
             root = root.child(
                 div()
                     .flex()
@@ -986,9 +920,13 @@ impl Render for DocumentView {
                             .flex()
                             .gap_2()
                             .child(div().flex_1().child(Input::new(&self.due).w_full()))
-                            .child(Button::new("add").label("Add").on_click(
-                                cx.listener(|view, _, window, cx| view.add_item(window, cx)),
-                            )),
+                            .child(
+                                Button::new("add")
+                                    .label("Add")
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        view.add_item(window, cx)
+                                    })),
+                            ),
                     ),
             );
         }
@@ -999,7 +937,7 @@ impl Render for DocumentView {
 
 #[cfg(test)]
 mod tests {
-    use super::{Placement, panel_bounds};
+    use super::{panel_bounds, Placement};
     use sofia_content::{Content, Document};
 
     #[test]
@@ -1097,13 +1035,7 @@ mod tests {
 
         // Clamping within viewport
         let b_clamped = panel_bounds(&doc, (5000., 5000.), 0, pill, pill_size, viewport, rem);
-        assert_eq!(
-            f32::from(b_clamped.origin.x),
-            1920. - expected_w - rem * 0.5
-        );
-        assert_eq!(
-            f32::from(b_clamped.origin.y),
-            1080. - expected_h - rem * 0.5
-        );
+        assert_eq!(f32::from(b_clamped.origin.x), 1920. - expected_w - rem * 0.5);
+        assert_eq!(f32::from(b_clamped.origin.y), 1080. - expected_h - rem * 0.5);
     }
 }
