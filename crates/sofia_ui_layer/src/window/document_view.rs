@@ -705,9 +705,7 @@ impl DocumentView {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .p_1()
-                        .rounded_md()
-                        .bg(cx.theme().muted.opacity(0.3))
+                        .py_0p5()
                         .child(
                             Checkbox::new(SharedString::from(item.id.clone()))
                                 .checked(item.done)
@@ -743,9 +741,7 @@ impl DocumentView {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .p_1()
-                        .rounded_md()
-                        .hover(|s| s.bg(cx.theme().muted.opacity(0.5)))
+                        .py_0p5()
                         .child(
                             Checkbox::new(SharedString::from(item.id.clone()))
                                 .checked(item.done)
@@ -802,16 +798,20 @@ impl DocumentView {
             cx.theme().blue,
             cx.theme().magenta,
         ];
+        let chart_id = SharedString::from(format!("chart-{}", self.doc.id));
         match chart_type {
             ChartType::Line => LineChart::new(points.to_vec())
+                .id(chart_id)
+                .appear(false)
                 .x(|point: &ChartPoint| point.label.clone())
                 .y(|point: &ChartPoint| point.value)
                 .stroke(cx.theme().blue)
                 .dot()
                 .y_axis(true)
-                .appear_key(self.doc.revision)
                 .into_any_element(),
             ChartType::Bar => BarChart::new(points.to_vec())
+                .id(chart_id)
+                .appear(false)
                 .band(|point: &ChartPoint| point.label.clone())
                 .value(|point: &ChartPoint| point.value)
                 .fill(move |point: &ChartPoint, _, _, _| {
@@ -821,16 +821,18 @@ impl DocumentView {
                         .unwrap_or(0)
                         % colors.len()]
                 })
-                .appear_key(self.doc.revision)
                 .into_any_element(),
             ChartType::Area => AreaChart::new(points.to_vec())
+                .id(chart_id)
+                .appear(false)
                 .x(|point: &ChartPoint| point.label.clone())
                 .y(|point: &ChartPoint| point.value)
                 .stroke(cx.theme().blue)
                 .fill(cx.theme().blue.opacity(0.2))
-                .appear_key(self.doc.revision)
                 .into_any_element(),
             ChartType::Pie => PieChart::new(points.to_vec())
+                .id(chart_id)
+                .appear(false)
                 .value(|point: &ChartPoint| point.value as f32)
                 .label(|point: &ChartPoint| point.label.clone().into())
                 .color(move |point: &ChartPoint| {
@@ -840,15 +842,15 @@ impl DocumentView {
                         .unwrap_or(0)
                         % colors.len()]
                 })
-                .appear_key(self.doc.revision)
                 .into_any_element(),
             ChartType::Radar => RadarChart::new(points.to_vec())
+                .id(chart_id)
+                .appear(false)
                 .label(|point: &ChartPoint| point.label.clone())
                 .value(|point: &ChartPoint| point.value)
                 .stroke(cx.theme().blue)
                 .fill(cx.theme().blue.opacity(0.2))
                 .dot()
-                .appear_key(self.doc.revision)
                 .into_any_element(),
         }
     }
