@@ -236,6 +236,13 @@ impl WindowManager {
             .collect()
     }
 
+    pub fn is_topmost(&self, id: &str, cx: &App) -> bool {
+        self.panels
+            .last()
+            .map(|panel| panel.view.read(cx).doc.id == id)
+            .unwrap_or(false)
+    }
+
     pub fn bring_to_top(&mut self, id: &str, cx: &App) {
         if let Some(pos) = self
             .panels
@@ -315,6 +322,9 @@ impl WindowManager {
                     .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                         let id = focus_id.clone();
                         parent_focus.update(cx, |pill, cx| {
+                            if pill.documents.is_topmost(&id, cx) {
+                                return;
+                            }
                             pill.documents.bring_to_top(&id, cx);
                             cx.notify();
                         });

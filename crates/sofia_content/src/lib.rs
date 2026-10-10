@@ -1,8 +1,10 @@
 //! Shared user-content repository, separate from model history.
 mod store;
+pub mod ui;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use store::Store;
+pub use ui::{ColorIntent, ComponentVariant, TrendDirection, UiNode};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -22,6 +24,9 @@ pub enum Content {
     },
     Html {
         html: String,
+    },
+    Card {
+        root: UiNode,
     },
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -57,6 +62,7 @@ impl Content {
             Self::Reminder { .. } => "reminder",
             Self::Chart { .. } => "chart",
             Self::Html { .. } => "html",
+            Self::Card { .. } => "card",
         }
     }
     pub fn tag(&self) -> &'static str {
@@ -65,6 +71,7 @@ impl Content {
             Self::Todo { .. } | Self::Reminder { .. } => "userwindow",
             Self::Chart { .. } => "visualizerwindow",
             Self::Html { .. } => "webwindow",
+            Self::Card { .. } => "generativewindow",
         }
     }
     pub fn validate(&self) -> Result<(), String> {
@@ -72,6 +79,7 @@ impl Content {
             return Err("Content exceeds 512 KiB".into());
         }
         match self {
+            Self::Card { root } => root.validate(0)?,
             Self::Todo { items } | Self::Reminder { items } => {
                 if items.len() > 500 {
                     return Err("At most 500 items".into());

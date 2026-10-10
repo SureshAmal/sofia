@@ -4,114 +4,23 @@ use gpui_kit::base::{ElementExt, TextSelectionScopeId};
 use gpui_kit::component::{
     ActiveTheme, Icon, Sizable,
     button::{Button, ButtonVariants as _},
-    chart::{AreaChart, BarChart, LineChart, PieChart, RadarChart},
     checkbox::Checkbox,
     input::{Input, InputState},
-    text::{MarkdownExtensions, TextView, TextViewState},
+    text::{TextView, TextViewState},
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
-use pulldown_cmark::{Event, Options, Parser};
 use sofia_content::{ChartPoint, ChartType, Content, Document, TodoItem};
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::mpsc;
+
+use super::views::{card_view, chart_view, note_view};
+
+pub use note_view::parse_markdown_blocks;
 
 pub(crate) enum Command {
     Save(Document),
     Close(String),
     Refresh,
-}
-
-type RenderedDiagram = Option<(Arc<gpui::Image>, f32, f32)>;
-
-#[derive(Clone)]
-pub(crate) struct MermaidBlock {
-    pub(crate) code: String,
-    pub(crate) rendered: Arc<std::sync::Mutex<RenderedDiagram>>,
-}
-
-fn hsla_to_hex(hsla: gpui::Hsla) -> String {
-    let rgba = hsla.to_rgb();
-    let r = (rgba.r * 255.0).round().clamp(0.0, 255.0) as u8;
-    let g = (rgba.g * 255.0).round().clamp(0.0, 255.0) as u8;
-    let b = (rgba.b * 255.0).round().clamp(0.0, 255.0) as u8;
-    format!("#{:02x}{:02x}{:02x}", r, g, b)
-}
-
-fn strip_foreign_objects(svg: &mut String) {
-    // `resvg` cannot paint HTML inside SVG foreignObject nodes. Merman also
-    // emits an SVG text fallback for those labels, so retaining both layers
-    // produces dark, doubled glyphs. Remove only the unsupported HTML nodes.
-    while let Some(start) = svg.find("<foreignObject") {
-        let Some(end_rel) = svg[start..].find("</foreignObject>") else {
-            svg.truncate(start);
-            break;
-        };
-        let end = start + end_rel + "</foreignObject>".len();
-        svg.replace_range(start..end, "");
-    }
-    while let Some(start) = svg.find("<foreignobject") {
-        let Some(end_rel) = svg[start..].find("</foreignobject>") else {
-            svg.truncate(start);
-            break;
-        };
-        let end = start + end_rel + "</foreignobject>".len();
-        svg.replace_range(start..end, "");
-    }
-}
-
-fn build_host_theme(theme: &gpui_kit::component::Theme) -> merman::svg::HostTheme {
-    use merman::svg::{HostTheme, HostThemeAppearance, ThemeRole};
-
-    let appearance = if theme.mode.is_dark() {
-        HostThemeAppearance::Dark
-    } else {
-        HostThemeAppearance::Light
-    };
-
-    let font_family = theme.font_family.to_string();
-    let mut host = HostTheme::new().with_appearance(appearance);
-    if let Ok(updated) = host
-        .clone()
-        .try_with_font_family(format!("{font_family}, sans-serif"))
-    {
-        host = updated;
-    }
-
-    let roles = [
-        (ThemeRole::Canvas, hsla_to_hex(theme.background)),
-        (ThemeRole::Surface, hsla_to_hex(theme.popover)),
-        (ThemeRole::SurfaceAlt, hsla_to_hex(theme.muted)),
-        (ThemeRole::SurfaceMuted, hsla_to_hex(theme.secondary)),
-        (ThemeRole::Text, hsla_to_hex(theme.foreground)),
-        (ThemeRole::SubtleText, hsla_to_hex(theme.muted_foreground)),
-        (ThemeRole::Border, hsla_to_hex(theme.border)),
-        (ThemeRole::Line, hsla_to_hex(theme.primary)),
-        (ThemeRole::ClusterBackground, hsla_to_hex(theme.popover)),
-        (ThemeRole::ClusterBorder, hsla_to_hex(theme.border)),
-        (ThemeRole::EdgeLabelBackground, hsla_to_hex(theme.background)),
-        (ThemeRole::ActorBackground, hsla_to_hex(theme.popover)),
-        (ThemeRole::ActorBorder, hsla_to_hex(theme.border)),
-        (ThemeRole::ActorText, hsla_to_hex(theme.foreground)),
-        (ThemeRole::Error, hsla_to_hex(theme.red)),
-    ];
-    for (role, color) in roles {
-        if let Ok(h) = host.clone().try_with_role(role, color) {
-            host = h;
-        }
-    }
-
-    let series = [
-        hsla_to_hex(theme.primary),
-        hsla_to_hex(theme.blue),
-        hsla_to_hex(theme.green),
-        hsla_to_hex(theme.yellow),
-        hsla_to_hex(theme.magenta),
-        hsla_to_hex(theme.cyan),
-    ];
-    if let Ok(h) = host.clone().try_with_series_palette(series) {
-        host = h;
-    }
-    host
 }
 
 pub(crate) struct DocumentView {
@@ -154,34 +63,6 @@ impl Render for WindowResize {
     }
 }
 
-pub fn parse_markdown_blocks(markdown: &str) -> Vec<std::ops::Range<usize>> {
-    let mut blocks = Vec::new();
-    let mut depth = 0;
-    let mut start = 0;
-    for (event, range) in Parser::new_ext(markdown, Options::all()).into_offset_iter() {
-        match event {
-            Event::Start(_) => {
-                if depth == 0 {
-                    start = range.start;
-                }
-                depth += 1;
-            }
-            Event::End(_) => {
-                depth -= 1;
-                if depth == 0 {
-                    blocks.push(start..range.end);
-                }
-            }
-            Event::Rule if depth == 0 => blocks.push(range),
-            _ => {}
-        }
-    }
-    if blocks.is_empty() {
-        blocks.push(0..markdown.len());
-    }
-    blocks
-}
-
 fn source(content: &Content) -> String {
     match content {
         Content::Note { markdown } => markdown.clone(),
@@ -210,6 +91,18 @@ impl DocumentView {
         let new_item = cx.new(|cx| InputState::new(window, cx).placeholder("New item"));
         let due =
             cx.new(|cx| InputState::new(window, cx).placeholder("Due time (optional ISO8601)"));
+        let initial_offset = doc
+            .tags
+            .iter()
+            .find_map(|t| {
+                let coords = t.strip_prefix("offset:")?;
+                let (x_str, y_str) = coords.split_once(',')?;
+                let x = x_str.trim().parse::<f32>().ok()?;
+                let y = y_str.trim().parse::<f32>().ok()?;
+                Some((x, y))
+            })
+            .unwrap_or((0.0, 0.0));
+
         Self {
             doc,
             scope_id: TextSelectionScopeId::new(),
@@ -222,9 +115,9 @@ impl DocumentView {
             pending_item: None,
             status: String::new(),
             hovered: false,
-            drag_offset: (0.0, 0.0),
+            drag_offset: initial_offset,
             dragging: false,
-            dragged_once: false,
+            dragged_once: initial_offset != (0.0, 0.0),
             drag_start_cursor: None,
             drag_start_offset: (0.0, 0.0),
             resizing: false,
@@ -234,6 +127,14 @@ impl DocumentView {
     }
 
     pub(crate) fn apply(&mut self, doc: Document, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing_item.is_some() {
+            // User is actively editing an item; stage remote updates so they don't overwrite typing.
+            self.remote = Some(doc);
+            self.status = "Remote update available".into();
+            cx.notify();
+            return;
+        }
+
         let content = source(&doc.content);
         self.text.update(cx, |state, cx| {
             state.set_text(&content, cx);
@@ -277,13 +178,16 @@ impl DocumentView {
     }
 
     pub(crate) fn on_drag_end(&mut self, cx: &mut Context<Self>) {
-        // Always clear the transient pointer state.  The release can arrive
-        // after the drag target has left the title bar, so relying on the
-        // `dragging` flag here can leave a stale cursor anchor behind.
         let changed = self.dragging || self.drag_start_cursor.is_some();
         self.dragging = false;
         self.drag_start_cursor = None;
         if changed {
+            // Persist the user's dragged position into tags as offset:x,y
+            let mut doc = self.doc.clone();
+            doc.tags.retain(|t| !t.starts_with("offset:"));
+            doc.tags.push(format!("offset:{:.1},{:.1}", self.drag_offset.0, self.drag_offset.1));
+            self.doc = doc.clone();
+            let _ = self.commands.send(Command::Save(doc));
             cx.notify();
         }
     }
@@ -424,6 +328,7 @@ impl DocumentView {
             Content::Reminder { .. } => IconName::Bell,
             Content::Chart { .. } => IconName::ChartBar,
             Content::Html { .. } => IconName::Globe,
+            Content::Card { .. } => IconName::LayoutDashboard,
         };
 
         let drag_handle = div()
@@ -527,160 +432,8 @@ impl DocumentView {
             .selectable(true)
             .scrollable(true)
             .size_full()
-            .markdown_extensions(Self::note_extensions().clone())
+            .markdown_extensions(note_view::note_extensions().clone())
             .into_any_element()
-    }
-
-    fn render_mermaid_svg(
-        code: &str,
-        theme: &gpui_kit::component::Theme,
-        fontdb: &Arc<usvg::fontdb::Database>,
-    ) -> Result<(Arc<gpui::Image>, f32, f32), String> {
-        use merman::svg::{Presentation, PresentationProfile, SvgPipeline};
-        use merman::{OperationControl, RenderOutput, RenderRequest, Renderer, SvgRequest};
-
-        let host_theme = build_host_theme(theme);
-        let presentation = Presentation::new()
-            .with_profile(PresentationProfile::MermanModern)
-            .with_theme(host_theme);
-        let resolved = presentation.resolve();
-        let renderer =
-            Renderer::new().with_engine(resolved.materialize_engine(merman::Engine::new()));
-
-        let request = SvgRequest {
-            pipeline: Some(SvgPipeline::resvg_safe()),
-            presentation: resolved.render_policy(),
-            options: merman::svg::SvgRenderOptions {
-                diagram_id: Some("sofia-mermaid-diagram".to_string()),
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let mut svg_str =
-            match renderer.render(RenderRequest::svg(code, OperationControl::new(), request)) {
-                Ok(RenderOutput::Svg(Some(output))) => output.svg().to_string(),
-                Ok(RenderOutput::Svg(None)) => {
-                    return Err("Mermaid produced no SVG output".to_string());
-                }
-                Ok(_) => return Err("Mermaid produced non-SVG output".to_string()),
-                Err(e) => return Err(format!("Mermaid render failed: {e}")),
-            };
-
-        strip_foreign_objects(&mut svg_str);
-
-        // Remove any hardcoded background styles/fills so diagram background is completely transparent
-        svg_str = svg_str.replace("background-color:white", "background-color:transparent");
-        svg_str = svg_str.replace("background-color: white", "background-color: transparent");
-        svg_str = svg_str.replace("background-color:#ffffff", "background-color:transparent");
-        svg_str = svg_str.replace("background-color: #ffffff", "background-color: transparent");
-        svg_str = svg_str.replace("background:#ffffff", "background:transparent");
-        svg_str = svg_str.replace("background: #ffffff", "background: transparent");
-        svg_str = svg_str.replace("background:white", "background:transparent");
-        svg_str = svg_str.replace("background: white", "background: transparent");
-        svg_str = svg_str.replace("fill=\"#FFFFFF\"", "fill=\"none\"");
-        svg_str = svg_str.replace("fill=\"#ffffff\"", "fill=\"none\"");
-        svg_str = svg_str.replace("fill=\"white\"", "fill=\"none\"");
-
-        let opt = usvg::Options {
-            fontdb: fontdb.clone(),
-            ..Default::default()
-        };
-        let rtree =
-            usvg::Tree::from_str(&svg_str, &opt).map_err(|e| format!("SVG parse error: {e}"))?;
-
-        let size = rtree.size();
-        let width = size.width();
-        let height = size.height();
-        let scale = 2.0f32;
-        let px_w = (width * scale).ceil().max(1.0) as u32;
-        let px_h = (height * scale).ceil().max(1.0) as u32;
-        let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(px_w, px_h)
-            .ok_or_else(|| "Failed to allocate diagram bitmap".to_string())?;
-        resvg::render(&rtree, transform, &mut pixmap.as_mut());
-        let png = pixmap
-            .encode_png()
-            .map_err(|e| format!("PNG encoding error: {e}"))?;
-        let image = Arc::new(gpui::Image::from_bytes(gpui::ImageFormat::Png, png));
-        Ok((image, width, height))
-    }
-
-    fn note_extensions() -> &'static MarkdownExtensions {
-        static EXTENSIONS: OnceLock<MarkdownExtensions> = OnceLock::new();
-        static FONTDB: OnceLock<Arc<usvg::fontdb::Database>> = OnceLock::new();
-
-        EXTENSIONS.get_or_init(|| {
-            let fontdb = FONTDB.get_or_init(|| {
-                let mut db = usvg::fontdb::Database::new();
-                db.load_system_fonts();
-                Arc::new(db)
-            });
-
-            MarkdownExtensions::default()
-                .block_parser(|node, _ctx| {
-                    if let markdown::mdast::Node::Code(code) = node
-                        && code.lang.as_deref() == Some("mermaid")
-                    {
-                        let block = MermaidBlock {
-                            code: code.value.clone(),
-                            rendered: Arc::new(std::sync::Mutex::new(None)),
-                        };
-                        return Some(gpui_kit::base::MarkdownNode::new("mermaid", block));
-                    }
-                    None
-                })
-                .block_renderer("mermaid", {
-                    let fontdb = fontdb.clone();
-                    move |node, _window, cx| {
-                        if let Some(block) = node.data::<MermaidBlock>() {
-                            let mut guard = block.rendered.lock().unwrap();
-                            if guard.is_none() {
-                                *guard =
-                                    Self::render_mermaid_svg(&block.code, cx.theme(), &fontdb).ok();
-                            }
-
-                            if let Some((image, width, height)) = guard.as_ref() {
-                                return div()
-                                    .w_full()
-                                    .my_3()
-                                    .flex()
-                                    .justify_center()
-                                    .items_center()
-                                    .child(
-                                        gpui::img(image.clone())
-                                            .w(px(*width))
-                                            .h(px(*height))
-                                            .max_w_full(),
-                                    )
-                                    .into_any_element();
-                            }
-
-                            // Keep the Markdown source visible when the
-                            // optional diagram renderer cannot parse a block.
-                            return div()
-                                .w_full()
-                                .my_3()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Diagram could not be rendered")
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .p_2()
-                                        .rounded_md()
-                                        .bg(cx.theme().muted.opacity(0.35))
-                                        .child(block.code.clone()),
-                                )
-                                .into_any_element();
-                        }
-                        div().into_any_element()
-                    }
-                })
-        })
     }
 
     fn render_todo_items(&self, items: &[TodoItem], cx: &Context<Self>) -> AnyElement {
@@ -762,7 +515,7 @@ impl DocumentView {
                                         .when(item.done, |this| this.line_through())
                                         .opacity(if item.done { 0.6 } else { 1.0 })
                                         .child(label),
-                                ),
+                                 ),
                         )
                         .child(
                             Button::new(SharedString::from(format!("remove-{}", item.id)))
@@ -786,73 +539,18 @@ impl DocumentView {
         points: &[ChartPoint],
         cx: &Context<Self>,
     ) -> AnyElement {
-        let labels = points
-            .iter()
-            .map(|point| point.label.clone())
-            .collect::<Vec<_>>();
-        let colors = [
-            cx.theme().red,
-            cx.theme().yellow,
-            cx.theme().green,
-            cx.theme().cyan,
-            cx.theme().blue,
-            cx.theme().magenta,
-        ];
         let chart_id = SharedString::from(format!("chart-{}", self.doc.id));
-        match chart_type {
-            ChartType::Line => LineChart::new(points.to_vec())
-                .id(chart_id)
-                .appear(false)
-                .x(|point: &ChartPoint| point.label.clone())
-                .y(|point: &ChartPoint| point.value)
-                .stroke(cx.theme().blue)
-                .dot()
-                .y_axis(true)
-                .into_any_element(),
-            ChartType::Bar => BarChart::new(points.to_vec())
-                .id(chart_id)
-                .appear(false)
-                .band(|point: &ChartPoint| point.label.clone())
-                .value(|point: &ChartPoint| point.value)
-                .fill(move |point: &ChartPoint, _, _, _| {
-                    colors[labels
-                        .iter()
-                        .position(|label| label == &point.label)
-                        .unwrap_or(0)
-                        % colors.len()]
-                })
-                .into_any_element(),
-            ChartType::Area => AreaChart::new(points.to_vec())
-                .id(chart_id)
-                .appear(false)
-                .x(|point: &ChartPoint| point.label.clone())
-                .y(|point: &ChartPoint| point.value)
-                .stroke(cx.theme().blue)
-                .fill(cx.theme().blue.opacity(0.2))
-                .into_any_element(),
-            ChartType::Pie => PieChart::new(points.to_vec())
-                .id(chart_id)
-                .appear(false)
-                .value(|point: &ChartPoint| point.value as f32)
-                .label(|point: &ChartPoint| point.label.clone().into())
-                .color(move |point: &ChartPoint| {
-                    colors[labels
-                        .iter()
-                        .position(|label| label == &point.label)
-                        .unwrap_or(0)
-                        % colors.len()]
-                })
-                .into_any_element(),
-            ChartType::Radar => RadarChart::new(points.to_vec())
-                .id(chart_id)
-                .appear(false)
-                .label(|point: &ChartPoint| point.label.clone())
-                .value(|point: &ChartPoint| point.value)
-                .stroke(cx.theme().blue)
-                .fill(cx.theme().blue.opacity(0.2))
-                .dot()
-                .into_any_element(),
-        }
+        chart_view::render_chart(chart_id, chart_type, points, cx)
+    }
+
+    fn render_card(&self, root: &sofia_content::ui::UiNode, cx: &Context<Self>) -> AnyElement {
+        div()
+            .id(SharedString::from(format!("card-body-{}", self.doc.id)))
+            .flex_1()
+            .w_full()
+            .overflow_y_scroll()
+            .child(card_view::render_generative_node(root, cx))
+            .into_any_element()
     }
 }
 
@@ -871,6 +569,7 @@ impl Render for DocumentView {
                 self.render_todo_items(items, cx)
             }
             Content::Chart { chart_type, points } => self.render_chart(chart_type, points, cx),
+            Content::Card { root } => self.render_card(root, cx),
         };
 
         let mut footer = div()
@@ -893,6 +592,7 @@ impl Render for DocumentView {
             );
         }
 
+        let scope_id = self.scope_id;
         let mut root = div()
             .id(SharedString::from(format!("doc-view-root-{}", self.doc.id)))
             .size_full()
@@ -902,6 +602,9 @@ impl Render for DocumentView {
             .gap_2()
             .p_2()
             .text_color(cx.theme().foreground)
+            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                gpui_kit::base::TextSelection::activate_scope(scope_id, window, cx);
+            })
             .on_action(cx.listener(|_, _: &Copy, window, cx| {
                 let text = gpui_kit::base::TextSelection::selected_text(window, cx);
                 if !text.is_empty() {

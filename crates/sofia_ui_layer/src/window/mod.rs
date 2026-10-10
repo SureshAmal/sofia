@@ -3,6 +3,7 @@
 pub mod document_view;
 pub mod layout;
 pub mod manager;
+pub mod views;
 
 pub use document_view::parse_markdown_blocks;
 pub use layout::{Placement, panel_bounds};
