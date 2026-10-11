@@ -8,6 +8,15 @@ use serde_json::{json, Value};
 
 use crate::models::{EmotionContext, EmotionTone, ToolDocRef};
 use crate::store::MemoryStore;
+fn silvem_cmd() -> std::process::Command {
+    if let Ok(exe) = std::env::current_exe() {
+        let sibling = exe.with_file_name(if cfg!(windows) { "silvem.exe" } else { "silvem" });
+        if sibling.is_file() {
+            return std::process::Command::new(sibling);
+        }
+    }
+    std::process::Command::new(if cfg!(windows) { "silvem.exe" } else { "silvem" })
+}
 
 #[derive(Clone)]
 pub struct SofiaMemoryMcp {
@@ -126,6 +135,22 @@ impl SofiaMemoryMcp {
                 .unwrap()
                 .clone(),
             ),
+            Tool::new(
+                "memory_rag_search",
+                "Perform hybrid (Dense Vector + BM25 Sparse) RAG search over synced local project files, code, and agent memory.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "Search query or question to retrieve local project context for" },
+                        "top_k": { "type": "integer", "description": "Max number of RAG search results to return (default 5)" },
+                        "folder": { "type": "string", "description": "Optional folder path filter to limit search to a specific synced directory" }
+                    },
+                    "required": ["query"]
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
         ]
     }
 
@@ -211,6 +236,77 @@ impl SofiaMemoryMcp {
             "memory_list_preferences" => {
                 let prefs = self.store.list_user_preferences().map_err(|e| e.to_string())?;
                 serde_json::to_value(prefs).map_err(|e| e.to_string())
+            }
+            "memory_rag_search" => {
+                let query = args.get("query").and_then(Value::as_str).ok_or("query required")?;
+                let limit = args.get("limit").or_else(|| args.get("top_k")).and_then(Value::as_u64).unwrap_or(5);
+                let folder = args.get("folder").and_then(Value::as_str);
+
+                // 1. Sync target folder into silvem vector database if specified
+                if let Some(f) = folder {
+                    let _ = silvem_cmd()
+                        .args(["sync", f])
+                        .output();
+                }
+
+                // 2. Execute silvem binary for EmbeddingGemma-2 + sqlite-vec hybrid RAG search
+                let silvem_res = silvem_cmd()
+                    .args(["search", query, "--hybrid", "--json", "-k", &limit.to_string()])
+                    .output();
+
+                if let Ok(output) = silvem_res {
+                    if output.status.success() {
+                        if let Ok(mut json_val) = serde_json::from_slice::<Value>(&output.stdout) {
+                            let mut rag_block = format!("# RAG Retrieval Context for Query: \"{}\"\n\n", query);
+                            let mut formatted_matches = Vec::new();
+
+                            if let Some(results) = json_val.get("results").and_then(Value::as_array) {
+                                for (idx, item) in results.iter().enumerate() {
+                                    let title = item.get("title").and_then(Value::as_str).unwrap_or("Untitled Document");
+                                    let uri = item.get("uri").and_then(Value::as_str).unwrap_or("N/A");
+                                    let content = item.get("content").and_then(Value::as_str).unwrap_or("");
+                                    let score = item.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+                                    let modality = item.get("modality").and_then(Value::as_str).unwrap_or("text");
+
+                                    rag_block.push_str(&format!(
+                                        "### Match {}: {}\n- **Source Path**: {}\n- **Modality**: {}\n- **Relevance Score**: {:.1}%\n\n```\n{}\n```\n\n",
+                                        idx + 1, title, uri, modality, score * 100.0, content
+                                    ));
+
+                                    formatted_matches.push(json!({
+                                        "rank": idx + 1,
+                                        "title": title,
+                                        "uri": uri,
+                                        "relevance_score": format!("{:.1}%", score * 100.0),
+                                        "modality": modality,
+                                        "content_snippet": content,
+                                    }));
+                                }
+                            }
+
+                            if let Some(obj) = json_val.as_object_mut() {
+                                obj.insert("ok".into(), json!(true));
+                                obj.insert("engine".into(), json!("silvem_embedding_gemma2_hybrid"));
+                                obj.insert("rag_context_block".into(), json!(rag_block));
+                                obj.insert("formatted_matches".into(), json!(formatted_matches));
+                                if let Some(f) = folder {
+                                    obj.insert("folder_filter".into(), json!(f));
+                                }
+                            }
+                            return Ok(json_val);
+                        }
+                    }
+                }
+
+                let result = self.store.recall(query, limit as usize).map_err(|e| e.to_string())?;
+                let response = json!({
+                    "ok": true,
+                    "engine": "fallback_store",
+                    "query": query,
+                    "folder_filter": folder,
+                    "recalled_items": result
+                });
+                Ok(response)
             }
             _ => Err(format!("Unknown memory tool: {name}")),
         }

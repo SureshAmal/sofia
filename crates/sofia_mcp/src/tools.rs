@@ -14,6 +14,15 @@ fn optional<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
 fn resolve(store: &Store, args: &Value) -> Result<sofia_content::Document, String> {
     store.resolve(optional(args, "id"), optional(args, "title"))
 }
+fn silvem_cmd() -> std::process::Command {
+    if let Ok(exe) = std::env::current_exe() {
+        let sibling = exe.with_file_name(if cfg!(windows) { "silvem.exe" } else { "silvem" });
+        if sibling.is_file() {
+            return std::process::Command::new(sibling);
+        }
+    }
+    std::process::Command::new(if cfg!(windows) { "silvem.exe" } else { "silvem" })
+}
 pub fn execute(store: &Store, name: &str, args: Value) -> Result<(Value, Option<String>), String> {
     let value = match name {
         "sofia_clipboard_read" => match crate::clipboard::read()? {
@@ -36,6 +45,95 @@ pub fn execute(store: &Store, name: &str, args: Value) -> Result<(Value, Option<
             let query = string(&args, "query")?;
             let url = crate::web::open(&query)?;
             json!({"ok": true, "url": url})
+        }
+        "sofia_open_file" => {
+            let path_str = string(&args, "path")?;
+            let path_trimmed = path_str.trim();
+            if path_trimmed.is_empty() {
+                return Err("path is required".into());
+            }
+            let path = std::path::Path::new(path_trimmed);
+            if !path.exists() {
+                return Err(format!("File or directory does not exist: {path_trimmed}"));
+            }
+            open::that(path).map_err(|e| format!("Could not open path with default application: {e}"))?;
+            json!({"ok": true, "opened_path": path_trimmed})
+        }
+        "sofia_rag_search" => {
+            let query = string(&args, "query")?;
+            let limit = args.get("top_k").and_then(Value::as_u64).unwrap_or(5);
+            let folder = optional(&args, "folder");
+            
+            // 1. Sync target folder into silvem vector database if specified
+            if let Some(f) = folder {
+                let _ = silvem_cmd()
+                    .args(["sync", f])
+                    .output();
+            }
+
+            // 2. Execute silvem hybrid RAG search (EmbeddingGemma-2 + sqlite-vec 768d + BM25)
+            let silvem_res = silvem_cmd()
+                .args(["search", &query, "--hybrid", "--json", "-k", &limit.to_string()])
+                .output();
+
+            if let Ok(output) = silvem_res {
+                if output.status.success() {
+                    if let Ok(mut json_val) = serde_json::from_slice::<Value>(&output.stdout) {
+                        let mut rag_block = format!("# RAG Retrieval Context for Query: \"{}\"\n\n", query);
+                        let mut formatted_matches = Vec::new();
+
+                        if let Some(results) = json_val.get("results").and_then(Value::as_array) {
+                            for (idx, item) in results.iter().enumerate() {
+                                let title = item.get("title").and_then(Value::as_str).unwrap_or("Untitled Document");
+                                let uri = item.get("uri").and_then(Value::as_str).unwrap_or("N/A");
+                                let content = item.get("content").and_then(Value::as_str).unwrap_or("");
+                                let score = item.get("score").and_then(Value::as_f64).unwrap_or(0.0);
+                                let modality = item.get("modality").and_then(Value::as_str).unwrap_or("text");
+
+                                rag_block.push_str(&format!(
+                                    "### Match {}: {}\n- **Source Path**: {}\n- **Modality**: {}\n- **Relevance Score**: {:.1}%\n\n```\n{}\n```\n\n",
+                                    idx + 1, title, uri, modality, score * 100.0, content
+                                ));
+
+                                formatted_matches.push(json!({
+                                    "rank": idx + 1,
+                                    "title": title,
+                                    "uri": uri,
+                                    "relevance_score": format!("{:.1}%", score * 100.0),
+                                    "modality": modality,
+                                    "content_snippet": content,
+                                }));
+                            }
+                        }
+
+                        if let Some(obj) = json_val.as_object_mut() {
+                            obj.insert("ok".into(), json!(true));
+                            obj.insert("engine".into(), json!("silvem_embedding_gemma2_hybrid"));
+                            obj.insert("rag_context_block".into(), json!(rag_block));
+                            obj.insert("formatted_matches".into(), json!(formatted_matches));
+                            if let Some(f) = folder {
+                                obj.insert("folder_filter".into(), json!(f));
+                            }
+                        }
+                        return Ok((json_val, None));
+                    }
+                }
+            }
+
+            let docs = store.list(Some(&query), None, None)?;
+            let mut rag_block = format!("# RAG Retrieval Context (Local Store) for Query: \"{}\"\n\n", query);
+            for (idx, doc) in docs.iter().enumerate() {
+                rag_block.push_str(&format!("### Document {}: {}\n- ID: {}\n- Kind: {}\n\n", idx + 1, doc.title, doc.id, doc.kind));
+            }
+
+            json!({
+                "ok": true,
+                "engine": "fallback_store",
+                "query": query,
+                "folder_filter": folder,
+                "rag_context_block": rag_block,
+                "results": docs
+            })
         }
         "sofia_screenshot" => {
             let bytes = crate::screenshot::capture()?;
@@ -340,11 +438,13 @@ pub fn declarations() -> Vec<Tool> {
         }
     });
     [
-        ("sofia_clipboard_read","Read the current Linux clipboard item and provide text or image content directly to the model",object(json!({}),vec![])),
-        ("sofia_list_applications","List installed Linux desktop applications, optionally filtered with fuzzy matching",object(json!({"query":{"type":"string","description":"Optional application name or desktop ID search"}}),vec![])),
-        ("sofia_open_application","Find and launch an installed Linux desktop application by fuzzy name or desktop ID",object(json!({"query":{"type":"string"}}),vec!["query"])),
+        ("sofia_clipboard_read","Read the current desktop clipboard item and provide text or image content directly to the model",object(json!({}),vec![])),
+        ("sofia_list_applications","List installed desktop applications, optionally filtered with fuzzy matching",object(json!({"query":{"type":"string","description":"Optional application name or desktop ID search"}}),vec![])),
+        ("sofia_open_application","Find and launch an installed desktop application by fuzzy name or desktop ID",object(json!({"query":{"type":"string"}}),vec!["query"])),
         ("sofia_open_web","Open a URL or DuckDuckGo query in the system browser. Bangs such as !yt rust are passed directly to DuckDuckGo.",object(json!({"query":{"type":"string"}}),vec!["query"])),
-        ("sofia_screenshot","Capture the current Wayland screen with grim and provide the PNG image directly to the model",object(json!({}),vec![])),
+        ("sofia_open_file","Open a local file or directory in its default system application using system default app handler",object(json!({"path":{"type":"string","description":"Absolute or relative path to file or directory to open"}}),vec!["path"])),
+        ("sofia_rag_search","Perform RAG (Retrieval-Augmented Generation) search over indexed local project files, documents, and memory",object(json!({"query":{"type":"string","description":"Search query or topic to retrieve local context for"},"top_k":{"type":"integer","description":"Max results to return (default 5)"},"folder":{"type":"string","description":"Optional folder path to filter search"}}),vec!["query"])),
+        ("sofia_screenshot","Capture the current desktop screen and provide the PNG image directly to the model",object(json!({}),vec![])),
         ("sofia_window_protocol","Get supported content kinds, tags, chart types (line, bar, area, pie, radar), window placements, inline editing rules, and open/closed window tracking",object(json!({}),vec![])),
         ("sofia_create_document","Persist and optionally open notes, todos, reminders, charts (line, bar, area, pie, radar), or HTML. Opens by default.",object(create,vec!["title","content"])),
         ("sofia_list_documents","Search saved content by indexed text, kind or tag. Returns document summaries with open/closed status.",object(json!({"query":{"type":"string"},"kind":{"type":"string"},"tag":{"type":"string"}}),vec![])),

@@ -1,8 +1,8 @@
 use cpal::traits::{DeviceTrait, HostTrait};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
-    ActiveTheme, IndexPath,
-    button::Button,
+    ActiveTheme, IndexPath, Sizable,
+    button::{Button, ButtonVariants},
     input::{Input, InputState, Textarea, TextareaState},
     select::{SearchableVec, Select, SelectEvent, SelectState},
     setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings as SettingsPanel},
@@ -33,6 +33,7 @@ pub struct SettingsView {
     voice: Picker,
     api_key: Entity<InputState>,
     api_model: Entity<InputState>,
+    rag_folder_input: Entity<InputState>,
     status: String,
     connected: bool,
     ipc: IpcClient,
@@ -203,6 +204,9 @@ impl SettingsView {
             }
         })
         .detach();
+        let rag_folder_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("e.g. /home/user/my_project")
+        });
         let mcp = cx.new(|cx| crate::mcp::McpPanel::new(&settings.mcp_servers, window, cx));
         Self {
             mcp,
@@ -218,11 +222,40 @@ impl SettingsView {
             voice,
             api_key,
             api_model,
+            rag_folder_input,
             status,
             connected: false,
             ipc,
         }
     }
+    fn add_rag_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self.rag_folder_input.read(cx).value().trim().to_string();
+        if value.is_empty() {
+            self.status = "Folder path cannot be empty.".into();
+            cx.notify();
+            return;
+        }
+        if self.settings.rag.sync_folders.contains(&value) {
+            self.status = format!("Folder is already in sync list: {}", value);
+            cx.notify();
+            return;
+        }
+        self.settings.rag.sync_folders.push(value.clone());
+        self.rag_folder_input.update(cx, |state, cx| {
+            state.set_value("", window, cx);
+        });
+        self.status = format!("Added RAG sync folder: {}. Click 'Save & apply' to save.", value);
+        cx.notify();
+    }
+
+    fn remove_rag_folder(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.settings.rag.sync_folders.len() {
+            let removed = self.settings.rag.sync_folders.remove(index);
+            self.status = format!("Removed RAG sync folder: {}. Click 'Save & apply' to save.", removed);
+            cx.notify();
+        }
+    }
+
     fn save_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.status = match sofia_config::save_appearance(&self.settings.appearance) {
             Ok(()) => {
@@ -365,6 +398,65 @@ impl Render for SettingsView {
         let get_view = cx.entity().downgrade();
         let set_view = get_view.clone();
         let mcp = self.mcp.clone();
+        let rag_input = self.rag_folder_input.clone();
+        let rag_enable_get = get_view.clone();
+        let rag_enable_set = set_view.clone();
+
+        let view_add = cx.entity().downgrade();
+        let view_remove = cx.entity().downgrade();
+
+        let mut rag_group = SettingGroup::new().title("RAG Memory Sync")
+            .item(SettingItem::new("Sync Memory", SettingField::switch(
+                move |cx| rag_enable_get.upgrade().is_some_and(|view| view.read(cx).settings.rag.enabled),
+                move |value, cx| { if let Some(view) = rag_enable_set.upgrade() { view.update(cx, |view, cx| { view.settings.rag.enabled = value; cx.notify(); }); } },
+            ).default_value(true)))
+            .item(SettingItem::new("Add Folder", SettingField::element(move |_: &gpui_kit::component::setting::RenderOptions, _: &mut Window, _: &mut App| {
+                let view_add = view_add.clone();
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_1().child(Input::new(&rag_input)))
+                    .child(
+                        Button::new("add-rag-folder")
+                            .primary()
+                            .icon(IconName::Plus)
+                            .tooltip("Add folder")
+                            .on_click(move |_, window, cx| {
+                                if let Some(view) = view_add.upgrade() {
+                                    view.update(cx, |view, cx| {
+                                        view.add_rag_folder(window, cx);
+                                    });
+                                }
+                            })
+                    )
+            })).layout(Axis::Vertical));
+
+        for (idx, folder_path) in self.settings.rag.sync_folders.iter().enumerate() {
+            let view_remove = view_remove.clone();
+            rag_group = rag_group.item(
+                SettingItem::new(
+                    SharedString::from(folder_path.clone()),
+                    SettingField::element(move |_: &gpui_kit::component::setting::RenderOptions, _: &mut Window, _: &mut App| {
+                        let view_remove = view_remove.clone();
+                        Button::new(format!("remove-rag-folder-{}", idx))
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Trash)
+                            .tooltip("Remove")
+                            .on_click(move |_, _, cx| {
+                                if let Some(view) = view_remove.upgrade() {
+                                    view.update(cx, |view, cx| {
+                                        view.remove_rag_folder(idx, cx);
+                                    });
+                                }
+                            })
+                    })
+                )
+            );
+        }
+
         let pages = SettingsPanel::new("sofia-settings")
             .page(SettingPage::new("Assistant").icon(IconName::Bot).description("How Sofia speaks and uses tools")
                 .group(SettingGroup::new().title("System prompt").item(
@@ -374,6 +466,8 @@ impl Render for SettingsView {
                         move |cx| dirty_prompt.read(cx).value().as_ref() != sofia_config::DEFAULT_SYSTEM_PROMPT,
                         move |window, cx| reset_prompt.update(cx, |state, cx| state.set_value(sofia_config::DEFAULT_SYSTEM_PROMPT, window, cx)),
                     )).layout(Axis::Vertical).description("Applied to the next live session. Restore defaults with the reset control."))))
+            .page(SettingPage::new("RAG Sync").icon(IconName::Search)
+                .group(rag_group))
             .page(SettingPage::new("Connection").icon(IconName::Network).description("Choose Google Cloud Vertex AI or the Gemini API")
                 .group(SettingGroup::new().title("Provider").item(
                     SettingItem::new("Use Vertex AI", SettingField::switch(

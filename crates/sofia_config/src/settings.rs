@@ -13,6 +13,23 @@ pub struct Settings {
     pub connection: ConnectionSettings,
     pub generative: GenerativeSettings,
     pub mcp_servers: Vec<McpServerConfig>,
+    pub rag: RagSettings,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RagSettings {
+    pub enabled: bool,
+    pub sync_folders: Vec<String>,
+}
+
+impl Default for RagSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sync_folders: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

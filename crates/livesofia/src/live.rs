@@ -222,17 +222,30 @@ pub async fn run(hub: EventHub, mut commands: mpsc::Receiver<LiveCommand>) {
         let mut session_config = config.session_config(selected_voice.as_deref());
         if let Ok(path) = sofia_memory::MemoryStore::default_path()
             && let Ok(mem_store) = sofia_memory::MemoryStore::open(&path)
-            && let Ok(prefs) = mem_store.list_user_preferences()
-            && !prefs.is_empty()
         {
-            let mut memory_context = String::from("\n\nLearned User Preferences & Rules (from persistent memory):\n");
-            for pref in prefs.iter().take(12) {
-                memory_context.push_str(&format!("- [{}] {}: {} (context: {})\n", pref.category, pref.key, pref.value, pref.source_context));
+            let mut memory_context = String::new();
+            if let Ok(prefs) = mem_store.list_user_preferences()
+                && !prefs.is_empty()
+            {
+                memory_context.push_str("\n\nLearned User Preferences & Rules (from persistent memory):\n");
+                for pref in prefs.iter().take(12) {
+                    memory_context.push_str(&format!("- [{}] {}: {} (context: {})\n", pref.category, pref.key, pref.value, pref.source_context));
+                }
             }
-            if let Some(instruction) = session_config.setup.system_instruction.as_mut() {
-                for part in &mut instruction.parts {
-                    if let Some(text) = part.text.as_mut() {
-                        text.push_str(&memory_context);
+            if let Ok(recall) = mem_store.recall("", 5)
+                && !recall.related_experiences.is_empty()
+            {
+                memory_context.push_str("\nRecent Session History & Previous Work (from persistent memory):\n");
+                for exp in recall.related_experiences.iter().take(5) {
+                    memory_context.push_str(&format!("- [Past Session] Asked: \"{}\" | Summary: {}\n", exp.user_query, exp.summary));
+                }
+            }
+            if !memory_context.is_empty() {
+                if let Some(instruction) = session_config.setup.system_instruction.as_mut() {
+                    for part in &mut instruction.parts {
+                        if let Some(text) = part.text.as_mut() {
+                            text.push_str(&memory_context);
+                        }
                     }
                 }
             }
@@ -312,6 +325,7 @@ async fn handle_session(
         None
     };
     let mut playback: Option<AudioPlayback> = None;
+    let mut current_user_query: Option<String> = None;
     // Tool turns may cause Gemini to narrate each call/result. Keep those
     // intermediate announcements in the UI only; speech resumes for the
     // final response after all tools have returned.
@@ -544,6 +558,23 @@ async fn handle_session(
                     continue;
                 }
                 if let Some(text_event) = transcript.observe(&event) {
+                    if let ServerEvent::AssistantTextFinal { text: ref assistant_text, .. } = text_event {
+                        if let Ok(path) = sofia_memory::MemoryStore::default_path()
+                            && let Ok(mem_store) = sofia_memory::MemoryStore::open(&path)
+                        {
+                            let query_text = current_user_query.take().unwrap_or_else(|| "User interaction".into());
+                            let summary_str = format!("Asked: {}. Answered: {}", query_text, assistant_text);
+                            let _ = mem_store.record_experience(
+                                Some(&session_id.to_string()),
+                                &query_text,
+                                &summary_str,
+                                Default::default(),
+                                Vec::new(),
+                                Vec::new(),
+                                0.6,
+                            );
+                        }
+                    }
                     hub.publish(text_event);
                 }
                 match event {
@@ -580,7 +611,10 @@ async fn handle_session(
                     GeminiEvent::OutputTranscription(_) => {
                         hub.set_state(TurnState::Speaking, Some(session_id));
                     }
-                    GeminiEvent::InputTranscription(text) => hub.publish(ServerEvent::InputText { text }),
+                    GeminiEvent::InputTranscription(text) => {
+                        current_user_query = Some(text.clone());
+                        hub.publish(ServerEvent::InputText { text });
+                    }
                     GeminiEvent::ToolCall(calls) => {
                         busy = true;
                         tool_audio_suppressed = true;
